@@ -1,0 +1,128 @@
+{
+  "fetched_at": "2026-10-16 08:17:05 GMT+8",
+  "source": "https://nfs.faireconomy.media/ff_calendar_thisweek.xml",
+  "note": "ForexFactory unofficial feed; waktu feed = UTC, dikonversi ke WITA.",
+  "events": [
+    {
+      "title": "Core CPI m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-14T12:30:00Z",
+      "event_time_wita": "2026-10-14 20:30 WITA",
+      "forecast": "0.2%",
+      "forecast_num": 0.2,
+      "previous": "0.3%",
+      "previous_num": 0.3
+    },
+    {
+      "title": "Core CPI y/y",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-14T12:30:00Z",
+      "event_time_wita": "2026-10-14 20:30 WITA",
+      "forecast": "2.5%",
+      "forecast_num": 2.5,
+      "previous": "2.4%",
+      "previous_num": 2.4
+    },
+    {
+      "title": "CPI m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-14T12:30:00Z",
+      "event_time_wita": "2026-10-14 20:30 WITA",
+      "forecast": "0.6%",
+      "forecast_num": 0.6,
+      "previous": "0.4%",
+      "previous_num": 0.4
+    },
+    {
+      "title": "CPI y/y",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-14T12:30:00Z",
+      "event_time_wita": "2026-10-14 20:30 WITA",
+      "forecast": "3.6%",
+      "forecast_num": 3.6,
+      "previous": "3.4%",
+      "previous_num": 3.4
+    },
+    {
+      "title": "Core PPI m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-15T12:30:00Z",
+      "event_time_wita": "2026-10-15 20:30 WITA",
+      "forecast": "0.3%",
+      "forecast_num": 0.3,
+      "previous": "0.2%",
+      "previous_num": 0.2
+    },
+    {
+      "title": "Core Retail Sales m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-15T12:30:00Z",
+      "event_time_wita": "2026-10-15 20:30 WITA",
+      "forecast": "0.6%",
+      "forecast_num": 0.6,
+      "previous": "1.4%",
+      "previous_num": 1.4
+    },
+    {
+      "title": "PPI m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-15T12:30:00Z",
+      "event_time_wita": "2026-10-15 20:30 WITA",
+      "forecast": "0.6%",
+      "forecast_num": 0.6,
+      "previous": "0.4%",
+      "previous_num": 0.4
+    },
+    {
+      "title": "Retail Sales m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-15T12:30:00Z",
+      "event_time_wita": "2026-10-15 20:30 WITA",
+      "forecast": "0.3%",
+      "forecast_num": 0.3,
+      "previous": "1.2%",
+      "previous_num": 1.2
+    },
+    {
+      "title": "Philly Fed Manufacturing Index",
+      "country": "USD",
+      "impact": "Medium",
+      "event_time_utc": "2026-10-15T12:30:00Z",
+      "event_time_wita": "2026-10-15 20:30 WITA",
+      "forecast": "28.2",
+      "forecast_num": 28.2,
+      "previous": "37.8",
+      "previous_num": 37.8
+    },
+    {
+      "title": "Unemployment Claims",
+      "country": "USD",
+      "impact": "Medium",
+      "event_time_utc": "2026-10-15T12:30:00Z",
+      "event_time_wita": "2026-10-15 20:30 WITA",
+      "forecast": "199K",
+      "forecast_num": 199.0,
+      "previous": "197K",
+      "previous_num": 197.0
+    },
+    {
+      "title": "Fed Chairman Warsh Speaks",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-10-16T03:30:00Z",
+      "event_time_wita": "2026-10-16 11:30 WITA",
+      "forecast": null,
+      "forecast_num": null,
+      "previous": null,
+      "previous_num": null
+    }
+  ]
+}
