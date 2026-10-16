@@ -78,6 +78,12 @@ CSS = """
 .rel { font-size:12px; color:#8b93a7; }
 .rel.future { color:#60a5fa; font-weight:600; }
 .rel.fresh { color:#22c55e; font-weight:700; }
+.prebrief { background:#0e1626; border:1px dashed #2b3b55; border-radius:10px;
+            padding:10px 12px; margin-top:10px; font-size:13px; }
+.prebrief div { margin-top:4px; }
+.netfx { background:#141b0e; border:1px solid #3f6212; border-radius:12px;
+         padding:12px 14px; margin:14px 0 12px 0; font-size:13px; }
+.netfx .muted { margin-top:6px; display:block; }
 .ev-title { font-size:16px; font-weight:700; margin-bottom:2px; }
 .ev-time { font-size:12.5px; color:#8b93a7; margin-bottom:10px; }
 .fpa { border-top:1px solid #1f2937; padding-top:8px; }
@@ -165,10 +171,33 @@ def fmt_actual(actual_num, forecast_raw):
     return f"{a}{suffix}"
 
 
+def is_speech_title(t):
+    tl = (t or "").lower()
+    return any(k in tl for k in ("speak", "speech", "testimony", "press conference"))
+
+
+def speech_speaker(title):
+    """Ambil nama pembicara dari judul pidato Fed.
+
+    'Fed Chairman Warsh Speaks' -> 'Warsh', 'FOMC Member Waller Speaks' -> 'Waller'.
+    None = bukan pidato."""
+    t = title or ""
+    if not is_speech_title(t):
+        return None
+    m = re.search(r"(?:chairman|chair|member|governor|president|vice chair)\s+([A-Za-z'\-]+)",
+                  t, re.IGNORECASE)
+    if m:
+        return m.group(1).capitalize()
+    return "Fed"
+
+
 def db_title_for(cal_title):
     """Petakan judul kalender -> judul kanonis di DB event-study."""
     t = (cal_title or "").lower()
-    if "non-farm" in t or t.strip().startswith("nfp"):
+    sp = speech_speaker(cal_title)
+    if sp:
+        return f"Speech: {sp}"
+    if "non-farm" in t or "nonfarm" in t or "non farm payroll" in t or t.strip().startswith("nfp"):
         return "NFP"
     if "core ppi" in t:
         return "PPI (core m/m)"
@@ -368,6 +397,73 @@ def load_finnhub_events(key):
     return out
 
 
+TV_CAL_URL = "https://economic-calendar.tradingview.com/events"
+
+
+@st.cache_data(ttl=1800)
+def load_tradingview_events(days_ahead=35):
+    """Minggu-minggu depan dari TradingView Economic Calendar.
+
+    Endpoint publik (dipakai widget TradingView sendiri), tanpa API key —
+    hanya butuh header Origin. [] = gagal / tidak ada event.
+    TIDAK PERNAH mengarang data."""
+    today = datetime.now(timezone.utc)
+    frm = today.strftime("%Y-%m-%dT00:00:00.000Z")
+    to = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%dT00:00:00.000Z")
+    url = f"{TV_CAL_URL}?from={frm}&to={to}&countries=US"
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Origin": "https://www.tradingview.com",
+        })
+        with urllib.request.urlopen(req, timeout=25) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for it in payload.get("result", []):
+        if (it.get("country") or "").upper() != "US":
+            continue
+        imp = it.get("importance")
+        if imp == 1:
+            impact = "High"
+        elif imp == 0:
+            impact = "Medium"
+        else:
+            continue  # -1 / None = low, skip
+        title = (it.get("title") or "?").strip()
+        tl = title.lower()
+        # TV memberi importance 0 ke sebagian event besar — koreksi eksplisit
+        if any(k in tl for k in ("cpi", "fomc", "federal funds", "non farm payrolls")):
+            impact = "High"
+        try:
+            dt = datetime.fromisoformat(str(it.get("date") or "").replace("Z", "+00:00"))
+            utc_iso = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, TypeError):
+            continue
+
+        def fmt_num(v):
+            if v is None:
+                return None
+            try:
+                f = float(v)
+                return str(int(f)) if f.is_integer() else str(round(f, 2))
+            except (TypeError, ValueError):
+                return str(v)
+
+        out.append({
+            "title": title,
+            "country": "USD",
+            "impact": impact,
+            "event_time_utc": utc_iso,
+            "forecast": fmt_num(it.get("forecast")),
+            "previous": fmt_num(it.get("previous")),
+            "src": "TV",
+        })
+    out.sort(key=lambda e: e["event_time_utc"])
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Data: DB event-study (actual terverifikasi + respon tipikal)
 # ----------------------------------------------------------------------------
@@ -411,10 +507,259 @@ def db_typical():
     return out
 
 
+@st.cache_data(ttl=300)
+def db_surprises():
+    """{db_title: [(actual, forecast), ...]} — max 5 rilis terakhir per metrik,
+    untuk tren surprise pra-rilis. Angka mentah apa adanya."""
+    out = {}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute(
+            "SELECT title, actual, forecast, event_time_utc FROM events"
+            " WHERE actual IS NOT NULL AND forecast IS NOT NULL"
+            " ORDER BY event_time_utc DESC").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return out
+    for title, actual, forecast, _eut in rows:
+        out.setdefault(title, [])
+        if len(out[title]) < 5:
+            out[title].append((actual, forecast))
+    return out
+
+
+@st.cache_data(ttl=300)
+def db_speech_map():
+    """{(db_title, tanggal): (tone, speaker, notes, ret_pct_m60_p60)}
+    untuk pidato yang sudah dilabeli nada (hawkish/dovish/neutral)."""
+    out = {}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute(
+            """SELECT e.title, e.event_time_utc, e.tone, e.speaker, e.notes, r.ret_pct
+               FROM events e LEFT JOIN responses r
+                 ON r.event_id = e.id AND r.window_label = 'm60_p60' AND r.symbol = 'GC=F'
+               WHERE e.tone IS NOT NULL""").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return out
+    for title, eut, tone, speaker, notes, ret in rows:
+        try:
+            d = datetime.strptime(eut, "%Y-%m-%dT%H:%M:%SZ").date().isoformat()
+        except (ValueError, TypeError):
+            continue
+        out[(title, d)] = (tone, speaker, notes, ret)
+    return out
+
+
+@st.cache_data(ttl=300)
+def db_speaker_stats():
+    """{speaker: {'tones': [(tanggal, tone)], 'n_resp': n, 'avg_ret': x}}."""
+    out = {}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        for speaker, eut, tone in con.execute(
+                "SELECT speaker, event_time_utc, tone FROM events"
+                " WHERE speaker IS NOT NULL ORDER BY event_time_utc DESC"):
+            try:
+                d = datetime.strptime(eut, "%Y-%m-%dT%H:%M:%SZ").date().isoformat()
+            except (ValueError, TypeError):
+                continue
+            st_ = out.setdefault(speaker, {"tones": [], "n_resp": 0, "avg_ret": 0.0})
+            if tone:
+                st_["tones"].append((d, tone))
+        rows = con.execute(
+            """SELECT e.speaker, r.ret_pct FROM responses r
+               JOIN events e ON e.id = r.event_id
+               WHERE r.window_label = 'm60_p60' AND r.symbol = 'GC=F'
+                 AND e.speaker IS NOT NULL""").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return out
+    by_sp = {}
+    for speaker, ret in rows:
+        by_sp.setdefault(speaker, []).append(ret)
+    for speaker, rets in by_sp.items():
+        if speaker in out:
+            out[speaker]["n_resp"] = len(rets)
+            out[speaker]["avg_ret"] = sum(rets) / len(rets)
+    return out
+
+
+def speech_box_html(e, dbt, now_utc, speech_map, speaker_stats):
+    """Box pra/pasca pidato.
+
+    PRA (<=7 hari): konteks factual — histori nada pembicara + reaksi
+    rata-rata emas. Pidato tidak punya angka forecast, jadi yang disajikan
+    adalah nada historis, bukan prediksi nada.
+    PASCA: label nada terverifikasi + reaksi emas terukur."""
+    title = e.get("title") or "?"
+    speaker = speech_speaker(title)
+    if not speaker:
+        return ""
+    dt_utc = parse_utc(e.get("event_time_utc"))
+    stats = speaker_stats.get(speaker, {"tones": [], "n_resp": 0, "avg_ret": 0.0})
+    if dt_utc and dt_utc >= now_utc:
+        if (dt_utc - now_utc).total_seconds() > 7 * 24 * 3600:
+            return ""
+        lines = [
+            f"🎙️ <b>Pidato {esc(speaker)}</b> — tidak ada angka forecast; "
+            f"yang menggerakkan pasar adalah <b>nada hawkish/dovish</b> vs ekspektasi."]
+        if stats["tones"]:
+            hist = ", ".join(f"{tone} ({d})" for d, tone in stats["tones"][:3])
+            lines.append(f"Nada pidato sebelumnya: <b>{esc(hist)}</b>")
+        else:
+            lines.append("Belum ada histori nada untuk pembicara ini di DB.")
+        if stats["n_resp"]:
+            caveat = " — data awal, belum stabil" if stats["n_resp"] < 5 else ""
+            lines.append(
+                f"Reaksi rata-rata emas ±1 jam pasca-pidato: "
+                f"<b>{stats['avg_ret']:+.3f}%</b> (N={stats['n_resp']}{caveat})")
+        lis = "".join(f"<div>· {l}</div>" for l in lines)
+        return (f'<div class="prebrief">{lis}'
+                f'<div class="muted">konteks factual dari DB event-study · bukan prediksi nada</div></div>')
+    key = (dbt, dt_utc.date().isoformat()) if (dbt and dt_utc) else None
+    rec = speech_map.get(key) if key else None
+    if not rec:
+        return ""
+    tone, _sp, notes, ret = rec
+    tone_id = {"hawkish": "hawkish 🔴", "dovish": "dovish 🟢",
+               "neutral": "netral ⚪"}.get(
+        (tone or "").lower(), f"{esc(tone or '-')} ⚪")
+    react = (f"· Reaksi terukur emas ±1 jam: <b>{ret:+.3f}%</b> (GC=F)"
+             if ret is not None else "· Reaksi terukur: belum diukur")
+    return (
+        f'<div class="prebrief">🎙️ <b>Pasca-pidato {esc(speaker)}</b>'
+        f"<div>· Nada: <b>{tone_id}</b></div>"
+        f"<div>· {esc(notes or '')}</div>"
+        f"<div>{react}</div>"
+        f'<div class="muted">label nada dari riset terverifikasi · angka = hasil ukur</div></div>'
+    )
+
+
+def pre_release_brief_html(e, dbt, typical, surprises, now_utc):
+    """Box brief pra-rilis di bawah kartu event mendatang (<=48 jam).
+
+    Murni kompilasi data terverifikasi: konsensus vs previous, frekuensi
+    surprise historis, respon tipikal. BUKAN ramalan angka rilis."""
+    dt_utc = parse_utc(e.get("event_time_utc"))
+    if not (dbt and dt_utc and dt_utc >= now_utc):
+        return ""
+    if (dt_utc - now_utc).total_seconds() > 48 * 3600:
+        return ""
+    f_raw, p_raw = e.get("forecast"), e.get("previous")
+    f_num, p_num = parse_num(f_raw), parse_num(p_raw)
+    lines = []
+    if f_num is not None and p_num is not None:
+        arah = "naik" if f_num > p_num else ("turun" if f_num < p_num else "sama")
+        lines.append(
+            f"Konsensus <b>{esc(f_raw)}</b> vs previous {esc(p_raw)} "
+            f"→ ekspektasi <b>{arah}</b>")
+    elif f_num is not None:
+        lines.append(f"Konsensus <b>{esc(f_raw)}</b> (previous belum ada di sumber)")
+    else:
+        lines.append("Konsensus <b>belum terbit</b> di sumber")
+    hist = surprises.get(dbt, [])
+    if hist:
+        above = sum(1 for a, f in hist if a > f)
+        lines.append(
+            f"Frekuensi historis: <b>{above}/{len(hist)}</b> rilis terakhir "
+            f"angkanya di atas forecast (probabilitas berbasis data, bukan ramalan)")
+    else:
+        lines.append("Belum ada histori surprise untuk metrik ini")
+    if dbt in typical:
+        n, avg = typical[dbt]
+        caveat = " — data awal, belum stabil" if n < 5 else ""
+        lines.append(
+            f"Respon tipikal ±1 jam: <b>{avg:+.3f}%</b> (N={n}{caveat})")
+    lis = "".join(f"<div>· {l}</div>" for l in lines)
+    return (
+        f'<div class="prebrief">🔮 <b>Brief pra-rilis</b> '
+        f'<span class="muted">(kompilasi data historis, bukan ramalan angka)</span>{lis}</div>'
+    )
+
+
+def gold_direction(dbt, actual_num, forecast_num):
+    """Arah implisit untuk EMAS dari satu rilis: 'down' (menekan), 'up'
+    (mendukung), 'neutral', atau 'none' (data belum lengkap).
+
+    Kanal USD: data AS yang menguatkan USD → menekan emas; sebaliknya
+    mendukung emas. Claims dibalik (klaim rendah = tenaga kerja kuat)."""
+    if actual_num is None or forecast_num is None:
+        return "none"
+    if actual_num == forecast_num:
+        return "neutral"
+    t = (dbt or "").lower()
+    is_claims = "claim" in t
+    hotter = actual_num > forecast_num
+    usd_strong = (hotter and not is_claims) or ((not hotter) and is_claims)
+    return "down" if usd_strong else "up"
+
+
+def event_actual(e, actuals):
+    """(actual_num, forecast_num, dbt) untuk satu event kalender."""
+    title = e.get("title") or "?"
+    dbt = db_title_for(title)
+    dt_utc = parse_utc(e.get("event_time_utc"))
+    actual_num = None
+    if dbt and dt_utc:
+        actual_num = actuals.get((dbt, dt_utc.date().isoformat()))
+    return actual_num, parse_num(e.get("forecast")), dbt
+
+
+def net_effect_html(group, actuals):
+    """Efek BERSIH ke emas untuk sekelompok rilis di jam yang sama.
+
+    Menghitung dari tiap event (positif/netral/negatif → menekan/mendukung
+    emas via kanal USD), lalu merangkum jadi satu teks. Heuristik transparan:
+    komponennya selalu ditampilkan, bukan black box."""
+    scored = []
+    for e in group:
+        actual_num, f_num, dbt = event_actual(e, actuals)
+        d = gold_direction(dbt, actual_num, f_num)
+        if d == "none":
+            continue
+        scored.append((e.get("title") or "?", d))
+    if len(scored) < 2:
+        return ""
+    downs = [t for t, d in scored if d == "down"]
+    ups = [t for t, d in scored if d == "up"]
+    neuts = [t for t, d in scored if d == "neutral"]
+    score = len(downs) - len(ups)
+    if score >= 3:
+        label = "tekanan <b>KUAT</b> ke bawah"
+    elif score >= 1:
+        label = "cenderung <b>menekan</b> emas ke bawah"
+    elif score <= -3:
+        label = "dorongan <b>KUAT</b> ke atas"
+    elif score <= -1:
+        label = "cenderung <b>mengangkat</b> emas ke atas"
+    else:
+        label = "<b>CAMPURAN</b> — tarik-menarik, bias tipis"
+    dt = parse_utc(group[0].get("event_time_utc"))
+    jam = dt.astimezone(WITA).strftime("%H:%M") if dt else "?"
+
+    def short(t):
+        return t.replace(" m/m", "").replace(" y/y", "")
+
+    parts = []
+    if downs:
+        parts.append(f"{len(downs)} menekan ({', '.join(short(t) for t in downs)})")
+    if ups:
+        parts.append(f"{len(ups)} mendukung ({', '.join(short(t) for t in ups)})")
+    if neuts:
+        parts.append(f"{len(neuts)} netral")
+    return (
+        f'<div class="netfx">⚖️ <b>Efek bersih {len(scored)} rilis ({jam} WITA)</b>: {label}'
+        f'<div class="muted">{" · ".join(parts)} — heuristik kanal USD, bukan model</div></div>'
+    )
+
+
 # ----------------------------------------------------------------------------
 # Render kartu
 # ----------------------------------------------------------------------------
-def event_card_html(e, now_utc, actuals, typical):
+def event_card_html(e, now_utc, actuals, typical, surprises=None,
+                    speech_map=None, speaker_stats=None):
     title = e.get("title") or "?"
     impact = e.get("impact") or "Medium"
     badge_cls = "high" if impact == "High" else "med"
@@ -466,6 +811,14 @@ def event_card_html(e, now_utc, actuals, typical):
                     'untuk metrik ini</span></div>')
 
     src_badge = f'<span class="badge src">{esc(src)}</span>' if src else ""
+    spk = speech_speaker(title)
+    if spk:
+        # Pidato: pakai box pidato (nada), bukan brief angka
+        sbox_html = speech_box_html(e, dbt, now_utc, speech_map or {}, speaker_stats or {})
+        brief_html = ""
+        typ_html = sbox_html  # gantikan box respon tipikal generik
+    else:
+        brief_html = pre_release_brief_html(e, dbt, typical, surprises or {}, now_utc)
     return (
         f'<div class="ev-card">'
         f'<div class="ev-top"><div><span class="badge {badge_cls}">{esc(impact)}</span>{src_badge}</div>'
@@ -473,8 +826,39 @@ def event_card_html(e, now_utc, actuals, typical):
         f'<div class="ev-title">{esc(title)}</div>'
         f'<div class="ev-time">{esc(dt_str)}</div>'
         f'<div class="fpa">{fpa}</div>'
-        f'{typ_html}</div>'
+        f'{typ_html}{brief_html}</div>'
     )
+
+
+def render_event_list(evs, now_utc, actuals, typical, surprises,
+                      speech_map=None, speaker_stats=None):
+    """Render daftar event; kelompokkan per jam rilis WITA dan sisipkan
+    box efek bersih untuk jam yang punya >=2 rilis dengan actual."""
+    groups, order, singles = {}, [], []
+    for e in evs:
+        dt = parse_utc(e.get("event_time_utc"))
+        if dt is None:
+            singles.append(e)
+            continue
+        w = dt.astimezone(WITA)
+        key = (w.date().isoformat(), w.hour, w.minute)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+    for key in order:
+        g = groups[key]
+        box = net_effect_html(g, actuals)
+        if box:
+            st.markdown(box, unsafe_allow_html=True)
+        for e in g:
+            st.markdown(event_card_html(e, now_utc, actuals, typical, surprises,
+                                        speech_map, speaker_stats),
+                        unsafe_allow_html=True)
+    for e in singles:
+        st.markdown(event_card_html(e, now_utc, actuals, typical, surprises,
+                                    speech_map, speaker_stats),
+                    unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------
@@ -494,12 +878,28 @@ with col_b:
         st.rerun()
 
 ff_events, ff_note = load_ff_events()
+tv_events = load_tradingview_events()
 key = finnhub_key()
-fh_events = load_finnhub_events(key) if key else None
+# Finnhub jadi fallback bila TradingView gagal total
+fh_events = load_finnhub_events(key) if (key and not tv_events) else None
 
-# Gabung + dedupe (FF diutamakan untuk minggu berjalan)
+# Batas minggu berjalan (Senin–Minggu WITA)
+week_start = today_wita - timedelta(days=today_wita.weekday())
+week_end = week_start + timedelta(days=6)
+
+
+def _wita_d(e):
+    dt = parse_utc(e.get("event_time_utc"))
+    return dt.astimezone(WITA).date() if dt else None
+
+
+# TV/Finnhub hanya untuk SETELAH minggu berjalan — FF yang pegang minggu ini
+tv_events = [e for e in tv_events if (_wita_d(e) or week_end) > week_end]
+fh_events = [e for e in (fh_events or []) if (_wita_d(e) or week_end) > week_end]
+
+# Gabung + dedupe (FF diutamakan untuk minggu berjalan, lalu TV, lalu Finnhub)
 seen, all_events = set(), []
-for e in ff_events + (fh_events or []):
+for e in ff_events + tv_events + (fh_events or []):
     k = ((e.get("title") or "").lower(), e.get("event_time_utc"))
     if k not in seen:
         seen.add(k)
@@ -508,6 +908,9 @@ all_events.sort(key=lambda e: (e.get("event_time_utc") is None, e.get("event_tim
 
 actuals = db_actuals()
 typical = db_typical()
+surprises = db_surprises()
+speech_map = db_speech_map()
+speaker_stats = db_speaker_stats()
 
 # --- Box rilis berikutnya (hitung mundur statis, dihitung saat render)
 upcoming = [e for e in all_events
@@ -537,14 +940,14 @@ else:
     st.info("Tidak ada rilis terjadwal dalam data yang dimuat.")
 
 st.caption(f"Sumber kalender: {ff_note}")
-if fh_events is None:
-    st.warning("ℹ️ Data minggu depan belum tersedia di feed gratis. "
-               "Tambahkan FINNHUB_API_KEY di Streamlit Secrets untuk mengisinya — "
-               "tanpa key, minggu depan dibiarkan kosong (tidak dikarang).",
-               icon="ℹ️")
-elif not fh_events:
-    st.warning("ℹ️ Finnhub terkonfigurasi tetapi tidak mengembalikan event — minggu depan kosong.",
-               icon="ℹ️")
+if tv_events:
+    st.caption(f"🔭 {len(tv_events)} event minggu-minggu depan via TradingView Economic Calendar (publik, tanpa API key).")
+elif fh_events:
+    st.caption(f"🔭 {len(fh_events)} event minggu depan via Finnhub.")
+else:
+    st.warning("ℹ️ Data minggu depan belum tersedia — feed gratis hanya mencakup "
+               "minggu berjalan dan sumber TradingView/Finnhub tidak mengembalikan "
+               "event. Tidak dikarang.", icon="ℹ️")
 
 # --- Filter impact
 imp_filter = st.radio("Filter impact", ["Semua", "High", "Medium"], horizontal=True)
@@ -557,8 +960,6 @@ def filt(events):
 
 
 # --- Partisi tab
-week_start = today_wita - timedelta(days=today_wita.weekday())  # Senin
-week_end = week_start + timedelta(days=6)
 month_key = (now_wita.year, now_wita.month)
 
 
@@ -585,26 +986,23 @@ with tab1:
     evs = filt(today_events)
     if not evs:
         st.info("Tidak ada event USD medium/high impact hari ini.")
-    for e in evs:
-        st.markdown(event_card_html(e, now_utc, actuals, typical), unsafe_allow_html=True)
+    render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
 
 with tab2:
     evs = filt(week_events)
     if not evs:
         st.info("Tidak ada event minggu ini di kalender.")
-    for e in evs:
-        st.markdown(event_card_html(e, now_utc, actuals, typical), unsafe_allow_html=True)
+    render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
     if next_week_events:
-        with st.expander(f"🔭 Minggu depan ({len(filt(next_week_events))} event, via Finnhub)"):
-            for e in filt(next_week_events):
-                st.markdown(event_card_html(e, now_utc, actuals, typical), unsafe_allow_html=True)
+        src_lbl = "TradingView" if any(e.get("src") == "TV" for e in next_week_events) else "Finnhub"
+        with st.expander(f"🔭 Minggu depan ({len(filt(next_week_events))} event, via {src_lbl})"):
+            render_event_list(filt(next_week_events), now_utc, actuals, typical, surprises, speech_map, speaker_stats)
 
 with tab3:
     evs = filt(month_events)
     if not evs:
         st.info("Belum ada event tercatat bulan ini.")
-    for e in evs:
-        st.markdown(event_card_html(e, now_utc, actuals, typical), unsafe_allow_html=True)
+    render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
 
 st.markdown(
     '<div class="foot">'
@@ -612,7 +1010,7 @@ st.markdown(
     '⚪ putih = sesuai ekspektasi · '
     '🔴 merah = kabar buruk untuk ekonomi AS<br>'
     '(logika dibalik untuk Unemployment Claims & data inflasi)<br><br>'
-    'Sumber kalender: ForexFactory feed (unofficial, gratis) · '
+    'Sumber kalender: ForexFactory feed (unofficial, gratis) + TradingView Economic Calendar (publik, untuk minggu depan) · '
     'Respon historis memakai <b>GC=F</b> sebagai proksi XAUUSD · '
     'N&lt;5 = data awal, belum stabil<br>'
     'Angka = hasil ukur, bukan ramalan · data, bukan sinyal.'
