@@ -73,6 +73,7 @@ CSS = """
          letter-spacing:.5px; }
 .badge.high { background:#3f1d1d; color:#f87171; border:1px solid #ef4444; }
 .badge.med { background:#3a2a08; color:#fbbf24; border:1px solid #f59e0b; }
+.badge.low { background:#1a1f2b; color:#8b93a7; border:1px solid #374151; }
 .badge.src { background:#0f1420; color:#8b93a7; border:1px solid #1f2937;
              margin-left:6px; }
 .rel { font-size:12px; color:#8b93a7; }
@@ -84,6 +85,8 @@ CSS = """
 .netfx { background:#141b0e; border:1px solid #3f6212; border-radius:12px;
          padding:12px 14px; margin:14px 0 12px 0; font-size:13px; }
 .netfx .muted { margin-top:6px; display:block; }
+.devrow { background:#0e1626; border-left:3px solid #60a5fa; border-radius:0 10px 10px 0;
+          padding:8px 12px; margin-top:10px; font-size:13px; }
 .ev-title { font-size:16px; font-weight:700; margin-bottom:2px; }
 .ev-time { font-size:12.5px; color:#8b93a7; margin-bottom:10px; }
 .fpa { border-top:1px solid #1f2937; padding-top:8px; }
@@ -272,13 +275,23 @@ def parse_number(raw):
         return None
 
 
+# Event Low-impact FF yang tetap relevan untuk XAUUSD (disorot di dossier
+# mingguan) — tetap ditampilkan dengan badge Low apa adanya, tidak di-upgrade.
+GOLD_LOW_ALLOW = ("nahb", "housing start", "building permit", "pending home",
+                  "adp", "case-shiller", "new home sales", "existing home sales",
+                  "pce", "payroll")
+
+
 def parse_event(ev):
     g = lambda t: (ev.findtext(t) or "").strip()  # noqa: E731
     country = g("country")
     impact = g("impact")
-    if country != "USD" or impact not in ("High", "Medium"):
+    if country != "USD":
         return None
     title = g("title")
+    if impact not in ("High", "Medium"):
+        if not (impact == "Low" and any(k in title.lower() for k in GOLD_LOW_ALLOW)):
+            return None
     m = re.match(r"(\d{2})-(\d{2})-(\d{4})", g("date"))
     if not m:
         return None
@@ -638,18 +651,20 @@ def speech_box_html(e, dbt, now_utc, speech_map, speaker_stats):
 
 
 def pre_release_brief_html(e, dbt, typical, surprises, now_utc):
-    """Box brief pra-rilis di bawah kartu event mendatang (<=48 jam).
+    """Box brief pra-rilis di bawah kartu event mendatang (<=7 hari).
 
-    Murni kompilasi data terverifikasi: konsensus vs previous, frekuensi
-    surprise historis, respon tipikal. BUKAN ramalan angka rilis."""
+    Tier 1 (SEMUA event): konsensus vs previous + skenario arah via kanal USD.
+    Tier 2 (event dengan histori DB): frekuensi surprise + respon tipikal.
+    Murni kompilasi data + heuristik transparan. BUKAN ramalan angka rilis."""
     dt_utc = parse_utc(e.get("event_time_utc"))
-    if not (dbt and dt_utc and dt_utc >= now_utc):
+    if not (dt_utc and dt_utc >= now_utc):
         return ""
-    if (dt_utc - now_utc).total_seconds() > 48 * 3600:
+    if (dt_utc - now_utc).total_seconds() > 7 * 24 * 3600:
         return ""
     f_raw, p_raw = e.get("forecast"), e.get("previous")
     f_num, p_num = parse_num(f_raw), parse_num(p_raw)
     lines = []
+    # Tier 1a: ekspektasi konsensus
     if f_num is not None and p_num is not None:
         arah = "naik" if f_num > p_num else ("turun" if f_num < p_num else "sama")
         lines.append(
@@ -659,23 +674,33 @@ def pre_release_brief_html(e, dbt, typical, surprises, now_utc):
         lines.append(f"Konsensus <b>{esc(f_raw)}</b> (previous belum ada di sumber)")
     else:
         lines.append("Konsensus <b>belum terbit</b> di sumber")
-    hist = surprises.get(dbt, [])
-    if hist:
-        above = sum(1 for a, f in hist if a > f)
+    # Tier 1b: skenario arah via kanal USD (deterministik, bukan ramalan)
+    t = (dbt or "").lower()
+    if "claim" in t:
         lines.append(
-            f"Frekuensi historis: <b>{above}/{len(hist)}</b> rilis terakhir "
-            f"angkanya di atas forecast (probabilitas berbasis data, bukan ramalan)")
+            "Skenario: klaim <b>di bawah</b> forecast (tenaga kerja kuat) → USD menguat "
+            "→ emas cenderung tertekan; sebaliknya emas cenderung terdukung.")
     else:
-        lines.append("Belum ada histori surprise untuk metrik ini")
-    if dbt in typical:
-        n, avg = typical[dbt]
-        caveat = " — data awal, belum stabil" if n < 5 else ""
         lines.append(
-            f"Respon tipikal ±1 jam: <b>{avg:+.3f}%</b> (N={n}{caveat})")
+            "Skenario: actual <b>di atas</b> forecast → USD menguat → emas cenderung "
+            "tertekan; sebaliknya emas cenderung terdukung.")
+    # Tier 2: histori DB bila ada mapping
+    if dbt:
+        hist = (surprises or {}).get(dbt, [])
+        if hist:
+            above = sum(1 for a, f in hist if a > f)
+            lines.append(
+                f"Frekuensi historis: <b>{above}/{len(hist)}</b> rilis terakhir "
+                f"angkanya di atas forecast (probabilitas berbasis data, bukan ramalan)")
+        if dbt in typical:
+            n, avg = typical[dbt]
+            caveat = " — data awal, belum stabil" if n < 5 else ""
+            lines.append(
+                f"Respon tipikal ±1 jam: <b>{avg:+.3f}%</b> (N={n}{caveat})")
     lis = "".join(f"<div>· {l}</div>" for l in lines)
     return (
         f'<div class="prebrief">🔮 <b>Brief pra-rilis</b> '
-        f'<span class="muted">(kompilasi data historis, bukan ramalan angka)</span>{lis}</div>'
+        f'<span class="muted">(kompilasi data + skenario kanal USD, bukan ramalan angka)</span>{lis}</div>'
     )
 
 
@@ -694,6 +719,26 @@ def gold_direction(dbt, actual_num, forecast_num):
     hotter = actual_num > forecast_num
     usd_strong = (hotter and not is_claims) or ((not hotter) and is_claims)
     return "down" if usd_strong else "up"
+
+
+def deviation_info(dbt, actual_num, forecast_num, surprises):
+    """Skor deviasi untuk rilis yang sudah keluar: (z, direction, n).
+
+    z = (actual-forecast) / std(surprise historis DB) — proper standardized
+    surprise, comparable antar event. None bila histori < 3 atau std = 0.
+    direction = arah implisit emas via gold_direction()."""
+    if actual_num is None or forecast_num is None:
+        return None
+    direction = gold_direction(dbt, actual_num, forecast_num)
+    hist = (surprises or {}).get(dbt, [])
+    z = None
+    if len(hist) >= 3:
+        diffs = [a - f for a, f in hist]
+        mean = sum(diffs) / len(diffs)
+        var = sum((x - mean) ** 2 for x in diffs) / (len(diffs) - 1)
+        if var > 0:
+            z = (actual_num - forecast_num) / (var ** 0.5)
+    return {"z": z, "direction": direction, "n": len(hist)}
 
 
 def event_actual(e, actuals):
@@ -762,7 +807,7 @@ def event_card_html(e, now_utc, actuals, typical, surprises=None,
                     speech_map=None, speaker_stats=None):
     title = e.get("title") or "?"
     impact = e.get("impact") or "Medium"
-    badge_cls = "high" if impact == "High" else "med"
+    badge_cls = "high" if impact == "High" else ("med" if impact == "Medium" else "low")
     src = e.get("src") or ""
     dt_utc = parse_utc(e.get("event_time_utc"))
 
@@ -779,6 +824,7 @@ def event_card_html(e, now_utc, actuals, typical, surprises=None,
     f_num = parse_num(f_raw)
 
     dbt = db_title_for(title)
+    spk = speech_speaker(title)
     actual_num, actual_html = None, '<span class="muted">menunggu rilis</span>'
     if dbt and dt_utc:
         actual_num = actuals.get((dbt, dt_utc.date().isoformat()))
@@ -796,6 +842,21 @@ def event_card_html(e, now_utc, actuals, typical, surprises=None,
         f'<div class="frow"><span>Actual</span>{actual_html}</div>'
     )
 
+    dev_html = ""
+    if actual_num is not None and not spk:
+        dev = deviation_info(dbt, actual_num, f_num, surprises)
+        if dev:
+            if dev["z"] is not None:
+                small = ' <i class="caveat">— sampel kecil</i>' if dev["n"] < 5 else ""
+                dev_html = (
+                    f'<div class="devrow">📐 Deviasi: <b>{dev["z"]:+.1f}σ</b> dari ekspektasi'
+                    f' <span class="muted">(N={dev["n"]})</span>{small}</div>')
+            else:
+                raw = actual_num - f_num
+                dev_html = (
+                    f'<div class="devrow">📐 Deviasi: <b>{raw:+g}</b> dari forecast'
+                    f' <span class="muted">(skala σ belum tersedia, histori &lt; 3)</span></div>')
+
     typ_html = ""
     if dbt and dbt in typical:
         n, avg = typical[dbt]
@@ -811,7 +872,6 @@ def event_card_html(e, now_utc, actuals, typical, surprises=None,
                     'untuk metrik ini</span></div>')
 
     src_badge = f'<span class="badge src">{esc(src)}</span>' if src else ""
-    spk = speech_speaker(title)
     if spk:
         # Pidato: pakai box pidato (nada), bukan brief angka
         sbox_html = speech_box_html(e, dbt, now_utc, speech_map or {}, speaker_stats or {})
@@ -826,7 +886,7 @@ def event_card_html(e, now_utc, actuals, typical, surprises=None,
         f'<div class="ev-title">{esc(title)}</div>'
         f'<div class="ev-time">{esc(dt_str)}</div>'
         f'<div class="fpa">{fpa}</div>'
-        f'{typ_html}{brief_html}</div>'
+        f'{dev_html}{typ_html}{brief_html}</div>'
     )
 
 
@@ -913,8 +973,11 @@ speech_map = db_speech_map()
 speaker_stats = db_speaker_stats()
 
 # --- Box rilis berikutnya (hitung mundur statis, dihitung saat render)
-upcoming = [e for e in all_events
-            if parse_utc(e.get("event_time_utc")) and parse_utc(e.get("event_time_utc")) >= now_utc]
+# Urut eksplisit via datetime (bukan string) agar selalu event terdekat.
+upcoming = sorted(
+    (e for e in all_events
+     if parse_utc(e.get("event_time_utc")) and parse_utc(e.get("event_time_utc")) >= now_utc),
+    key=lambda e: parse_utc(e.get("event_time_utc")))
 if upcoming:
     nx = upcoming[0]
     nx_dt = parse_utc(nx["event_time_utc"])
