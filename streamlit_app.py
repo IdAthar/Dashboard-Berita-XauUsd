@@ -60,6 +60,7 @@ DB_PATH = os.path.join(HERE, "news_events.db")
 LOCAL_CAL_PATH = os.path.join(HERE, "news_calendar.json")
 WEEK_AHEAD_PATH = os.path.join(HERE, "week_ahead.json")
 MONTHLY_NOTES_PATH = os.path.join(HERE, "monthly_notes.json")
+WEEKLY_NARRATIVE_PATH = os.path.join(HERE, "weekly_narrative.json")
 
 WITA = timezone(timedelta(hours=8))  # GMT+8
 
@@ -673,6 +674,143 @@ def load_monthly_notes():
 
 
 @st.cache_data(ttl=300)
+def load_weekly_narrative():
+    """{week_start_iso: {...}} dari weekly_narrative.json (narasi makro mingguan).
+
+    File ditulis manual tiap minggu dari angka terverifikasi — pola yang sama
+    dengan alasan mingguan Oktober. Bila minggu ini belum ditulis, dialog
+    menampilkan kalimat 'belum ditulis', bukan karangan."""
+    try:
+        with open(WEEKLY_NARRATIVE_PATH) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("week_start"):
+            return {data["week_start"]: data}
+        if isinstance(data, dict):
+            return {w.get("week_start"): w for w in data.get("weeks", [])
+                    if w.get("week_start")}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+@st.cache_data(ttl=300)
+def db_strength():
+    """{db_title: (N, mean_|ret60|, mean_|ret240|)} — besaran gerak khas emas.
+
+    Kekuatan sinyal diukur dari BESARAN gerak (mean |ret|), bukan arah:
+    dengan N sekecil ini arah belum bisa diklaim (lihat SPEC Analisa
+    Fundamental v2). N selalu ditampilkan bersama angkanya."""
+    out = {}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute(
+            """SELECT e.title, r.window_label, r.ret_pct FROM responses r
+               JOIN events e ON e.id = r.event_id
+               WHERE r.symbol = 'GC=F'""").fetchall()
+        con.close()
+    except sqlite3.Error:
+        return out
+    by_title = {}
+    for title, label, ret in rows:
+        by_title.setdefault(title, {}).setdefault(label, []).append(ret)
+    for title, labs in by_title.items():
+        r60 = labs.get("m60_p60", [])
+        r240 = labs.get("m60_p240", [])
+        m60 = sum(abs(x) for x in r60) / len(r60) if r60 else None
+        m240 = sum(abs(x) for x in r240) / len(r240) if r240 else None
+        out[title] = (len(r60), m60, m240)
+    return out
+
+
+def strength_label(dbt):
+    """(tier, N, mean_|ret60|) — tier per SPEC Analisa Fundamental v2.
+
+    HIGH: N>=2 dan mean|ret60| >= 0,40%. MEDIUM: mean|ret60| >= 0,15%.
+    LOW: sisanya. 'none' bila belum ada baris di DB."""
+    s = db_strength()
+    if not dbt or dbt not in s:
+        return "none", 0, None
+    n, m60, _m240 = s[dbt]
+    if m60 is None:
+        return "none", n, None
+    if n >= 2 and m60 >= 0.40:
+        return "HIGH", n, m60
+    if m60 >= 0.15:
+        return "MEDIUM", n, m60
+    return "LOW", n, m60
+
+
+def strength_line(dbt):
+    """Satu baris label kekuatan sinyal untuk satu judul kanonis."""
+    tier, n, m60 = strength_label(dbt)
+    if tier == "HIGH":
+        return (f"🔥 **BERNILAI TINGGI** — gerak khas emas ±1 jam "
+                f"**{m60:.2f}%** (N={n} rilis tercatat)")
+    if tier == "MEDIUM":
+        return f"◆ SEDANG — gerak khas emas ±1 jam {m60:.2f}% (N={n})"
+    if tier == "LOW":
+        return (f"○ RENDAH (sejauh ini) — gerak khas emas ±1 jam {m60:.2f}% "
+                f"(N={n})")
+    return "Belum terukur — belum ada rilis tercatat di database."
+
+
+def scenario_text(dbt):
+    """Satu baris skenario pra-rilis via kanal USD (deterministik, bukan ramalan)."""
+    t = (dbt or "").lower()
+    if "claim" in t:
+        return ("Skenario: klaim **di bawah** forecast (tenaga kerja kuat) → USD menguat → "
+                "emas cenderung tertekan; sebaliknya emas cenderung terdukung.")
+    return ("Skenario: actual **di atas** forecast → USD menguat → emas cenderung "
+            "tertekan; sebaliknya emas cenderung terdukung.")
+
+
+def combined_read(rows, label):
+    """Bacaan gabungan atas event yang SUDAH rilis. None bila belum ada.
+
+    Menghitung dari tiap rilis via gold_direction(): 'down' = pro-USD
+    (menekan emas), 'up' = kontra-USD (mendukung emas). Kejutan terbesar
+    dipilih dari z-score deviasi vs histori bila ada, else selisih
+    actual-forecast terbesar. Komponen selalu ditampilkan, bukan black box."""
+    done = [r for r in rows
+            if r["actual"] is not None and r["forecast"] is not None]
+    if not done:
+        return None
+    pro = contra = neutral = 0
+    scored = []
+    for r in done:
+        d = gold_direction(r["title"], r["actual"], r["forecast"])
+        if d == "down":
+            pro += 1
+        elif d == "up":
+            contra += 1
+        else:
+            neutral += 1
+        info = deviation_info(r["title"], r["actual"], r["forecast"], surprises)
+        scored.append((r, info["z"] if info else None))
+    with_z = [(r, z) for r, z in scored if z is not None]
+    if with_z:
+        big_r, big_z = max(with_z, key=lambda x: abs(x[1]))
+        big_txt = (f"Kejutan terbesar: **{big_r['title']}** "
+                   f"(z={big_z:+.1f}σ vs histori deviasi)")
+    else:
+        big_r = max(done, key=lambda r: abs(r["actual"] - r["forecast"]))
+        big_txt = (f"Kejutan terbesar: **{big_r['title']}** "
+                   f"(actual {big_r['actual']:g} vs forecast {big_r['forecast']:g})")
+    if pro > contra:
+        net = (f"Arah bersih {label}: **pro-USD** — {pro} event menekan emas "
+               f"vs {contra} mendukung")
+    elif contra > pro:
+        net = (f"Arah bersih {label}: **kontra-USD** — {contra} event mendukung emas "
+               f"vs {pro} menekan")
+    else:
+        net = (f"Arah bersih {label}: **berimbang** — {pro} pro-USD "
+               f"vs {contra} kontra-USD")
+    if neutral:
+        net += f" ({neutral} sesuai ekspektasi)"
+    return f"**Bacaan gabungan {label}:** {net}.\n\n{big_txt}."
+
+
+@st.cache_data(ttl=300)
 def db_event_rows(date_from, date_to):
     """Baris event-study per tanggal rilis: actual/forecast + respon GC=F.
 
@@ -1128,6 +1266,7 @@ speech_map = db_speech_map()
 speaker_stats = db_speaker_stats()
 week_ahead = load_week_ahead()
 monthly_notes = load_monthly_notes()
+weekly_narrative = load_weekly_narrative()
 
 # Override forecast kartu minggu depan dengan median WSJ (bila cocok
 # judul kanonis + tanggal WITA). Kartu tetap menampilkan badge sumber WSJ.
