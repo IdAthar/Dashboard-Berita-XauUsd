@@ -45,6 +45,12 @@ Tambahan 9 Nov 2026 (Analisa Fundamental v2, SPEC_Analisa_Fundamental_v2.md):
     (arah belum bisa diklaim dengan N sekecil ini); N selalu ditampilkan.
   - Hari tanpa event menampilkan preview event berikut, bukan kosong.
 """
+
+# Cross-check xaudaily (9 Nov 2026): dialog Mingguan menampilkan kotak
+# "Cross-check xaudaily" (tick COMEX, odds FOMC Polymarket, NFP/UMich vs
+# DB, CPI y/y + estimasi model berlabel belum tervalidasi); penutup
+# Bulanan menampilkan SPDR + arus bank sentral. Nilai xaudaily = revisi
+# terbaru; FRED vintage tetap otoritas first print.
 import html
 import json
 import os
@@ -71,6 +77,12 @@ LOCAL_CAL_PATH = os.path.join(HERE, "news_calendar.json")
 WEEK_AHEAD_PATH = os.path.join(HERE, "week_ahead.json")
 MONTHLY_NOTES_PATH = os.path.join(HERE, "monthly_notes.json")
 WEEKLY_NARRATIVE_PATH = os.path.join(HERE, "weekly_narrative.json")
+# Cross-check xaudaily.com (CC BY 4.0 — atribusi wajib di mana pun
+# datanya tampil). ?src= dipertahankan (syarat kanal mereka).
+# Nilai xaudaily = REVISI terbaru, bukan first print — FRED vintage
+# tetap otoritas first print di DB; beda = revisi, bukan kesalahan.
+XAUDAILY_URL = "https://xaudaily.com/readings.en.json?src=muse-newsapp"
+XAUDAILY_PATH = os.path.join(HERE, "data", "xaudaily_readings.json")
 
 WITA = timezone(timedelta(hours=8))  # GMT+8
 
@@ -703,6 +715,135 @@ def load_weekly_narrative():
     return {}
 
 
+@st.cache_data(ttl=1800)
+def load_xaudaily():
+    """(data, sumber) — live fetch diutamakan, fallback file bundel.
+
+    sumber: 'live' | 'bundel <generated_at>' | 'tidak tersedia'.
+    Live gagal (timeout/HTTP/validasi) -> file data/xaudaily_readings.json
+    yang di-push terakhir. Keduanya gagal -> (None, 'tidak tersedia')."""
+    try:
+        req = urllib.request.Request(
+            XAUDAILY_URL, headers={"User-Agent": "Muse-newsapp/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.load(r)
+        if data.get("schema") == "xaudaily.readings/v1" and data.get("readings"):
+            return data, "live"
+    except Exception:
+        pass
+    try:
+        with open(XAUDAILY_PATH) as f:
+            data = json.load(f)
+        if data.get("schema") == "xaudaily.readings/v1":
+            return data, f"bundel {data.get('generated_at') or 'tanpa tanggal'}"
+    except (OSError, ValueError):
+        pass
+    return None, "tidak tersedia"
+
+
+def _latest_actual(actuals, title):
+    """(tanggal, actual) terbaru untuk judul DB, atau (None, None)."""
+    cand = [(d, v) for (t, d), v in actuals.items() if t == title]
+    if not cand:
+        return None, None
+    d, v = max(cand)
+    return d, v
+
+
+def xaudaily_check_lines(xd, actuals):
+    """Baris cross-check xaudaily vs DB (markdown, tanpa label sumber).
+
+    Aturan: hanya NFP + UMich yang bisa dibandingkan langsung (level).
+    CPI/PCE/PPI xaudaily = y/y, DB = m/m — TIDAK dibandingkan, hanya
+    konteks. Nilai xaudaily = revisi terbaru, DB = first print."""
+    if not xd:
+        return ["_Cross-check xaudaily tidak tersedia (fetch gagal)._"]
+    r = xd.get("readings", {})
+    x = r.get("extra", {})
+    lines = []
+    live = (r.get("gold") or {}).get("live") or {}
+    if live.get("last"):
+        lines.append(f"Emas (COMEX tick ~30 mnt): **${live['last']:,.2f}** "
+                     f"({live.get('date', '')} {live.get('time', '')}) — "
+                     f"cross-check harga, bukan harga desk.")
+    pm = x.get("polymarket") or {}
+    if pm.get("hike25") is not None:
+        lines.append(f"Odds FOMC 10 Des (Polymarket, {pm.get('asOf', '')}): "
+                     f"hike **{pm['hike25'] * 100:.1f}%** · "
+                     f"hold {pm.get('hold', 0) * 100:.1f}% · "
+                     f"cut {(pm.get('cut25', 0) + pm.get('cut50', 0)) * 100:.1f}% — "
+                     f"market pricing, bukan konsensus WSJ.")
+    nfp = r.get("nfp") or {}
+    if nfp.get("vals") and nfp.get("months"):
+        xv = nfp["vals"][-1] * 10  # 10k persons -> K
+        xm = nfp["months"][-1]
+        d, dv = _latest_actual(actuals, "NFP")
+        if dv is not None:
+            if abs(xv - dv) < 0.5:
+                lines.append(f"NFP {xm}: xaudaily **{xv:g}K** = DB first print "
+                             f"**{dv:g}K** ({d}) — cocok.")
+            else:
+                lines.append(f"NFP {xm}: xaudaily **{xv:g}K** vs DB first print "
+                             f"**{dv:g}K** ({d}) — beda = revisi setelah rilis, "
+                             f"bukan kesalahan.")
+        else:
+            lines.append(f"NFP {xm}: xaudaily **{xv:g}K** "
+                         f"(DB belum punya actual).")
+    mi = x.get("michigan") or {}
+    if mi.get("vals") and mi.get("months"):
+        xv = mi["vals"][-1]
+        xm = mi["months"][-1]
+        d, dv = _latest_actual(actuals, "UMich Consumer Sentiment")
+        if dv is not None:
+            if abs(xv - dv) < 0.05:
+                lines.append(f"UMich {xm}: xaudaily **{xv:g}** = DB "
+                             f"**{dv:g}** ({d}) — cocok.")
+            else:
+                lines.append(f"UMich {xm}: xaudaily **{xv:g}** vs DB "
+                             f"**{dv:g}** ({d}) — beda = revisi setelah rilis.")
+        else:
+            lines.append(f"UMich {xm}: xaudaily **{xv:g}** "
+                         f"(DB belum punya actual).")
+    cpi = r.get("cpi") or {}
+    if cpi.get("vals"):
+        lines.append(f"CPI y/y (xaudaily, {cpi.get('asOf', '')}): "
+                     f"**{cpi['vals'][-1]:g}%** — y/y, tidak dibandingkan "
+                     f"dengan m/m di DB. Rilis berikut {cpi.get('nextPub', '—')}.")
+    evs = x.get("events") or []
+    cpi_ev = next((e for e in evs if "CPI" in (e.get("title") or "")), None)
+    if cpi_ev:
+        lines.append(f"Estimasi model xaudaily untuk "
+                     f"{cpi_ev.get('title', 'CPI')}: "
+                     f"{cpi_ev.get('est', '—')} ({cpi_ev.get('prob', '')}) — "
+                     f"estimasi model, BELUM tervalidasi, bukan konsensus.")
+    stale = [k for k in ("gold", "cpi", "nfp", "pce", "ppi")
+             if (r.get(key) or {}).get("stale")]
+    if stale:
+        lines.append(f"⚠ Field stale di xaudaily: {', '.join(stale)} — angka "
+                     f"di atas adalah nilai terakhir yang baik, bukan terbaru.")
+    return lines
+
+
+def xaudaily_macro_line(xd):
+    """Satu baris konteks makro bulanan (SPDR + arus bank sentral)."""
+    if not xd:
+        return None
+    x = (xd.get("readings") or {}).get("extra", {})
+    parts = []
+    sp = x.get("spdr") or {}
+    if sp.get("value"):
+        parts.append(f"SPDR Gold ETF **{sp['value']:,.1f} ton** "
+                     f"({sp.get('date', '')})")
+    cf = x.get("cbFlow") or {}
+    if cf.get("lastMonth"):
+        parts.append(f"arus beli bank sentral (IMF) terakhir "
+                     f"**{cf['lastMonth']}**")
+    if not parts:
+        return None
+    return ("Konteks makro (xaudaily): " + " · ".join(parts) + ". "
+            "Sumber: Gold Data Reading · XAU Daily (xaudaily.com), CC BY 4.0.")
+
+
 @st.cache_data(ttl=300)
 def db_strength():
     """{db_title: (N, mean_|ret60|, mean_|ret240|)} — besaran gerak khas emas.
@@ -1277,6 +1418,7 @@ speaker_stats = db_speaker_stats()
 week_ahead = load_week_ahead()
 monthly_notes = load_monthly_notes()
 weekly_narrative = load_weekly_narrative()
+xaudaily_data, xaudaily_src = load_xaudaily()
 
 # Override forecast kartu minggu depan dengan median WSJ (bila cocok
 # judul kanonis + tanggal WITA). Kartu tetap menampilkan badge sumber WSJ.
@@ -1438,6 +1580,12 @@ def dialog_mingguan():
             st.markdown(f"- **{m.get('title', '')}:** {m.get('text', '')}")
     else:
         st.markdown("_Narasi makro minggu ini belum ditulis._")
+    # Cross-check xaudaily (CC BY 4.0 — atribusi wajib)
+    st.markdown("### Cross-check xaudaily")
+    st.markdown(f"Sumber: Gold Data Reading · XAU Daily (xaudaily.com) — "
+                f"data {xaudaily_src}.")
+    for ln in xaudaily_check_lines(xaudaily_data, actuals):
+        st.markdown(f"- {ln}")
     # Pra-rilis: semua event minggu ini, BERNILAI TINGGI di atas
     tier_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "none": 3}
     week_evs = sorted(
@@ -1543,6 +1691,9 @@ def dialog_bulanan():
                         f"actual {big['actual']:g} vs forecast {big['forecast']:g}).")
     else:
         st.markdown("_Belum ada rilis bulan ini yang tercatat actual-nya._")
+    macro = xaudaily_macro_line(xaudaily_data)
+    if macro:
+        st.markdown(macro)
 
 
 col_d1, col_d2, col_d3 = st.columns(3)
@@ -1598,6 +1749,8 @@ st.markdown(
     'Konsensus minggu depan: WSJ Data Week Ahead (median survei, jumlah ekonom dalam kurung) · '
     'Respon historis memakai <b>GC=F</b> sebagai proksi XAUUSD · '
     'N&lt;5 = data awal, belum stabil<br>'
+    'Cross-check: XAU Daily (xaudaily.com, CC BY 4.0) — nilai revisi terbaru, '
+    'bukan first print<br>'
     'Angka = hasil ukur, bukan ramalan · data, bukan sinyal.'
     '</div>',
     unsafe_allow_html=True,
