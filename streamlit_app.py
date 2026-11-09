@@ -24,6 +24,16 @@ Deploy         :  push streamlit_app.py + requirements.txt + news_events.db
                   Tambahkan FINNHUB_API_KEY di Settings -> Secrets bila ada.
 
 Hanya butuh paket `streamlit`; sisanya stdlib.
+
+Tambahan 7 Nov 2026:
+  - Seksi "Minggu Depan — konsensus WSJ" (week_ahead.json, ditulis manual
+    seminggu sekali dari WSJ Data Week Ahead) + override forecast kartu
+    minggu depan dengan median WSJ. y/y tidak di-override (metrik beda).
+  - Tiga dialog analisa: Harian (event hari ini + pengingat snapshot kolam),
+    Mingguan (sudah rilis minggu ini + tabel WSJ minggu depan),
+    Bulanan (minggu demi minggu + alasan mingguan dari monthly_notes.json).
+  - db_title_for disinkronkan dengan news_dashboard.py: CPI headline vs
+    core dibedakan, ditambah ISM, S&P PMI, UMich, JOLTS, Earnings, PCE, GDP.
 """
 import html
 import json
@@ -48,6 +58,8 @@ st.set_page_config(
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(HERE, "news_events.db")
 LOCAL_CAL_PATH = os.path.join(HERE, "news_calendar.json")
+WEEK_AHEAD_PATH = os.path.join(HERE, "week_ahead.json")
+MONTHLY_NOTES_PATH = os.path.join(HERE, "monthly_notes.json")
 
 WITA = timezone(timedelta(hours=8))  # GMT+8
 
@@ -195,7 +207,10 @@ def speech_speaker(title):
 
 
 def db_title_for(cal_title):
-    """Petakan judul kalender -> judul kanonis di DB event-study."""
+    """Petakan judul kalender -> judul kanonis di DB event-study.
+
+    Disinkronkan dengan news_dashboard.py (7 Nov 2026): CPI headline
+    dan core DIBEDAKAN — jangan samakan, actual-nya beda."""
     t = (cal_title or "").lower()
     sp = speech_speaker(cal_title)
     if sp:
@@ -204,16 +219,40 @@ def db_title_for(cal_title):
         return "NFP"
     if "core ppi" in t:
         return "PPI (core m/m)"
-    if "cpi" in t:
+    if "core cpi" in t:
         return "CPI (core m/m)"
+    if "cpi" in t:
+        return "CPI (headline m/m)"
     if "ppi" in t:
         return "PPI (final demand m/m)"
     if "core retail" in t:
         return "Retail Sales (core m/m)"
     if "retail sales" in t:
         return "Retail Sales (m/m)"
+    if "ism manufacturing" in t:
+        return "ISM Manufacturing PMI"
+    if "ism services" in t:
+        return "ISM Services PMI"
+    if "flash manufacturing" in t:
+        return "S&P Global Manufacturing PMI"
+    if "flash services" in t:
+        return "S&P Global Services PMI"
+    if "uom consumer sentiment" in t:
+        return "UMich Consumer Sentiment"
     if "philly fed" in t:
         return "Philly Fed Manufacturing"
+    if "unemployment rate" in t:
+        return "Unemployment Rate"
+    if "average hourly earnings" in t:
+        return "Average Hourly Earnings m/m"
+    if "jolts" in t:
+        return "JOLTS Job Openings"
+    if "core pce" in t:
+        return "Core PCE (m/m)"
+    if "pce" in t:
+        return "PCE (m/m)"
+    if "gdp" in t:
+        return "GDP (advance q/q)"
     if "claim" in t:
         return "Unemployment Claims"
     return None
@@ -599,6 +638,122 @@ def db_speaker_stats():
     return out
 
 
+# ----------------------------------------------------------------------------
+# Data: Week-ahead WSJ + catatan mingguan bulanan
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def load_week_ahead():
+    """Tabel pra-registrasi WSJ minggu depan (week_ahead.json) atau None.
+
+    File ditulis manual seminggu sekali dari WSJ Data Week Ahead (Jumat).
+    Bukan auto-fetch — survei WSJ tidak punya API gratis."""
+    try:
+        with open(WEEK_AHEAD_PATH) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("events"), list):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+@st.cache_data(ttl=300)
+def load_monthly_notes():
+    """{week_start_iso: {'label': ..., 'reason': ...}} dari monthly_notes.json."""
+    try:
+        with open(MONTHLY_NOTES_PATH) as f:
+            data = json.load(f)
+        out = {}
+        for w in data.get("weeks", []):
+            if w.get("week_start"):
+                out[w["week_start"]] = w
+        return out
+    except (OSError, ValueError):
+        return {}
+
+
+@st.cache_data(ttl=300)
+def db_event_rows(date_from, date_to):
+    """Baris event-study per tanggal rilis: actual/forecast + respon GC=F.
+
+    List dict {title, eut, forecast, previous, actual, ret60, ret240}
+    terurut waktu rilis. ret = None bila jendela belum terukur
+    (tidak dikarang)."""
+    out = []
+    try:
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute(
+            "SELECT id, title, event_time_utc, forecast, previous, actual FROM events"
+            " WHERE substr(event_time_utc, 1, 10) >= ? AND substr(event_time_utc, 1, 10) <= ?"
+            " ORDER BY event_time_utc", (date_from, date_to)).fetchall()
+        ids = [r[0] for r in rows]
+        resp = {}
+        if ids:
+            q = ",".join("?" * len(ids))
+            for eid, label, ret in con.execute(
+                    "SELECT event_id, window_label, ret_pct FROM responses"
+                    f" WHERE event_id IN ({q}) AND symbol = 'GC=F'", ids):
+                resp.setdefault(eid, {})[label] = ret
+        con.close()
+    except sqlite3.Error:
+        return out
+    for eid, title, eut, fc, prev, actual in rows:
+        r = resp.get(eid, {})
+        out.append({"title": title, "eut": eut, "forecast": fc, "previous": prev,
+                    "actual": actual, "ret60": r.get("m60_p60"),
+                    "ret240": r.get("m60_p240")})
+    return out
+
+
+def wsj_override_map(week_ahead):
+    """{(db_title, tanggal_wita): event_wsj} untuk override forecast kartu.
+
+    Hanya metrik yang punya judul DB 1:1. y/y dikecualikan — metrik berbeda
+    dari m/m, jangan sampai menimpa kartu m/m."""
+    out = {}
+    if not week_ahead:
+        return out
+    for ev in week_ahead.get("events", []):
+        title = (ev.get("title") or "")
+        if "y/y" in title.lower():
+            continue
+        dbt = db_title_for(title)
+        if not dbt or not ev.get("date"):
+            continue
+        out[(dbt, ev["date"])] = ev
+    return out
+
+
+def wsj_table_markdown(week_ahead, actuals):
+    """Tabel markdown minggu depan WSJ + kolom Actual dari DB bila sudah rilis."""
+    if not week_ahead:
+        return ""
+    rows = ["| Hari | Jam | Event | Forecast WSJ | Previous | Actual |",
+            "|---|---|---|---|---|---|"]
+    for ev in week_ahead.get("events", []):
+        d = ev.get("date") or ""
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d").date()
+            hari = f"{HARI[dt.weekday()]}, {dt.day} {BULAN[dt.month-1]}"
+        except ValueError:
+            hari = d
+        fc = ev.get("forecast_raw") or "-"
+        n = ev.get("n_economists")
+        fc_lbl = f"{fc} ({n})" if n else fc
+        dbt = db_title_for(ev.get("title") or "")
+        actual = actuals.get((dbt, d)) if dbt else None
+        act_lbl = f"{actual:g}" if actual is not None else "—"
+        rows.append(f"| {hari} | {ev.get('time_wita') or '-'} | {ev.get('title')} | "
+                    f"{fc_lbl} | {ev.get('previous') or '-'} | {act_lbl} |")
+    table = "\n".join(rows)
+    src = week_ahead.get("source", "WSJ Data Week Ahead")
+    notes = "\n".join(f"- {n}" for n in week_ahead.get("notes", []))
+    extra = f"\n\n{notes}" if notes else ""
+    return (f"**Minggu Depan — konsensus WSJ**\n\n{table}\n\n"
+            f"Sumber: {src} · angka dalam kurung = jumlah ekonom · "
+            f"NA = tidak ada konsensus WSJ (kosong, bukan 0){extra}")
+
+
 def speech_box_html(e, dbt, now_utc, speech_map, speaker_stats):
     """Box pra/pasca pidato.
 
@@ -971,6 +1126,21 @@ typical = db_typical()
 surprises = db_surprises()
 speech_map = db_speech_map()
 speaker_stats = db_speaker_stats()
+week_ahead = load_week_ahead()
+monthly_notes = load_monthly_notes()
+
+# Override forecast kartu minggu depan dengan median WSJ (bila cocok
+# judul kanonis + tanggal WITA). Kartu tetap menampilkan badge sumber WSJ.
+wsj_map = wsj_override_map(week_ahead)
+for e in all_events:
+    dt = parse_utc(e.get("event_time_utc"))
+    if not dt:
+        continue
+    key = (db_title_for(e.get("title") or ""), dt.astimezone(WITA).date().isoformat())
+    w = wsj_map.get(key)
+    if w and w.get("forecast_raw"):
+        e["forecast"] = w["forecast_raw"]
+        e["src"] = "WSJ"
 
 # --- Box rilis berikutnya (hitung mundur statis, dihitung saat render)
 # Urut eksplisit via datetime (bukan string) agar selalu event terdekat.
@@ -1039,6 +1209,109 @@ month_events = [e for e in all_events
 next_week_events = [e for e in all_events
                      if wita_date(e) and week_end < wita_date(e) <= week_end + timedelta(days=7)]
 
+
+# --- Dialog analisa (tombol -> jendela modal) ---
+@st.dialog("📊 Analisa Harian", width="large")
+def dialog_harian():
+    rows = db_event_rows(today_wita.isoformat(), today_wita.isoformat())
+    measured = [r for r in rows if r["ret60"] is not None]
+    st.markdown(f"**{HARI[today_wita.weekday()]}, {today_wita.day} {BULAN[today_wita.month-1]} "
+                f"{today_wita.year}** — {len(today_events)} event USD medium/high, "
+                f"{len(measured)} sudah terukur respon ±1 jamnya.")
+    upcoming_today = [e for e in upcoming
+                      if _wita_d(e) == today_wita and e.get("impact") == "High"]
+    if upcoming_today:
+        nx = upcoming_today[0]
+        st.info(f"📌 Sebelum {fmt_dt_wita(parse_utc(nx['event_time_utc']))}: "
+                f"snapshot kolam Tahap 2 (pool disapu + pool target, toleransi "
+                f"0,25×ATR) dari chart-mu sendiri — gerakan pertama pasca-rilis "
+                f"dibaca sebagai sweep, bukan keputusan.")
+    render_event_list(filt(today_events), now_utc, actuals, typical, surprises,
+                      speech_map, speaker_stats)
+
+
+@st.dialog("📈 Analisa Mingguan", width="large")
+def dialog_mingguan():
+    ws, we = week_start.isoformat(), week_end.isoformat()
+    rows = db_event_rows(ws, we)
+    done = [r for r in rows if r["actual"] is not None]
+    st.markdown(f"**Minggu {week_start.day}–{week_end.day} "
+                f"{BULAN[week_start.month-1]} {week_start.year}** — "
+                f"{len(rows)} event tercatat di DB, {len(done)} sudah rilis "
+                f"dengan actual.")
+    if done:
+        lines = ["| Event | Actual | Forecast | ±1 jam |",
+                 "|---|---|---|---|"]
+        for r in done:
+            ret = f"{r['ret60']:+.2f}%" if r["ret60"] is not None else "—"
+            fc = f"{r['forecast']:g}" if r["forecast"] is not None else "—"
+            act = f"{r['actual']:g}" if r["actual"] is not None else "—"
+            lines.append(f"| {r['title']} | {act} | {fc} | {ret} |")
+        st.markdown("\n".join(lines))
+        st.caption("Respon ±1 jam = GC=F, proksi XAUUSD · N kecil = data awal, "
+                   "belum stabil.")
+    else:
+        st.info("Belum ada rilis minggu ini yang tercatat actual-nya di DB.")
+    st.markdown("---")
+    if week_ahead:
+        st.markdown(wsj_table_markdown(week_ahead, actuals), unsafe_allow_html=True)
+    else:
+        st.info("Tabel WSJ minggu depan belum tersedia — file week_ahead.json "
+                "belum ada.")
+
+
+@st.dialog("🗓️ Analisa Bulanan", width="large")
+def dialog_bulanan():
+    st.markdown(f"**{BULAN[now_wita.month-1]} {now_wita.year}** — bulan dipecah "
+                f"jadi minggu Senin–Minggu. Alasan per minggu hanya dari angka "
+                f"terverifikasi; jendela yang belum terukur tampil kosong.")
+    first = now_wita.replace(day=1)
+    if now_wita.month == 12:
+        next_first = first.replace(year=first.year + 1, month=1)
+    else:
+        next_first = first.replace(month=first.month + 1)
+    last_day = next_first - timedelta(days=1)
+    cur = first - timedelta(days=first.weekday())
+    while cur <= last_day:
+        ws = cur
+        we = min(cur + timedelta(days=6), last_day)
+        note = monthly_notes.get(ws.isoformat(), {})
+        label = note.get("label") or f"Minggu {ws.day}–{we.day} {BULAN[ws.month-1]}"
+        with st.expander(f"{label} ({ws.day} {BULAN[ws.month-1]} – "
+                         f"{we.day} {BULAN[we.month-1]})"):
+            reason = note.get("reason")
+            if reason:
+                st.markdown(f"**Alasan minggu ini:** {reason}")
+            else:
+                st.markdown("_Alasan minggu ini belum ditulis — minggu belum tutup "
+                            "atau angkanya belum terverifikasi._")
+            rows = db_event_rows(ws.isoformat(), we.isoformat())
+            if rows:
+                lines = ["| Event | Actual | Forecast | ±1 jam | ±4 jam |",
+                         "|---|---|---|---|---|"]
+                for r in rows:
+                    r60 = f"{r['ret60']:+.2f}%" if r["ret60"] is not None else "—"
+                    r240 = f"{r['ret240']:+.2f}%" if r["ret240"] is not None else "—"
+                    fc = f"{r['forecast']:g}" if r["forecast"] is not None else "—"
+                    act = f"{r['actual']:g}" if r["actual"] is not None else "—"
+                    lines.append(f"| {r['title']} | {act} | {fc} | {r60} | {r240} |")
+                st.markdown("\n".join(lines))
+            else:
+                st.markdown("_Belum ada event tercatat minggu ini._")
+        cur += timedelta(days=7)
+
+
+col_d1, col_d2, col_d3 = st.columns(3)
+with col_d1:
+    if st.button("📊 Analisa Harian", use_container_width=True):
+        dialog_harian()
+with col_d2:
+    if st.button("📈 Analisa Mingguan", use_container_width=True):
+        dialog_mingguan()
+with col_d3:
+    if st.button("🗓️ Analisa Bulanan", use_container_width=True):
+        dialog_bulanan()
+
 tab1, tab2, tab3 = st.tabs([
     f"Hari ini ({len(filt(today_events))})",
     f"Minggu ini ({len(filt(week_events))})",
@@ -1056,6 +1329,10 @@ with tab2:
     if not evs:
         st.info("Tidak ada event minggu ini di kalender.")
     render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
+    # Tabel WSJ minggu depan (bila file-nya memang untuk minggu depan)
+    if week_ahead and (week_ahead.get("week_start") or "") > week_end.isoformat():
+        st.markdown("---")
+        st.markdown(wsj_table_markdown(week_ahead, actuals), unsafe_allow_html=True)
     if next_week_events:
         src_lbl = "TradingView" if any(e.get("src") == "TV" for e in next_week_events) else "Finnhub"
         with st.expander(f"🔭 Minggu depan ({len(filt(next_week_events))} event, via {src_lbl})"):
@@ -1074,6 +1351,7 @@ st.markdown(
     '🔴 merah = kabar buruk untuk ekonomi AS<br>'
     '(logika dibalik untuk Unemployment Claims & data inflasi)<br><br>'
     'Sumber kalender: ForexFactory feed (unofficial, gratis) + TradingView Economic Calendar (publik, untuk minggu depan) · '
+    'Konsensus minggu depan: WSJ Data Week Ahead (median survei, jumlah ekonom dalam kurung) · '
     'Respon historis memakai <b>GC=F</b> sebagai proksi XAUUSD · '
     'N&lt;5 = data awal, belum stabil<br>'
     'Angka = hasil ukur, bukan ramalan · data, bukan sinyal.'
