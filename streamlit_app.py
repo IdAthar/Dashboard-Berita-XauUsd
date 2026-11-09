@@ -34,6 +34,16 @@ Tambahan 7 Nov 2026:
     Bulanan (minggu demi minggu + alasan mingguan dari monthly_notes.json).
   - db_title_for disinkronkan dengan news_dashboard.py: CPI headline vs
     core dibedakan, ditambah ISM, S&P PMI, UMich, JOLTS, Earnings, PCE, GDP.
+
+Tambahan 9 Nov 2026 (Analisa Fundamental v2, SPEC_Analisa_Fundamental_v2.md):
+  - Tiga dialog ditulis ulang jadi analisa: pra-rilis (konsensus, skenario
+    kanal USD) + pasca-rilis (actual vs forecast, respon ±1 jam terukur)
+    + narasi makro dari weekly_narrative.json + bacaan gabungan
+    (pro-USD vs kontra-USD, kejutan terbesar via z-score).
+  - Tier kekuatan sinyal dari DB (db_strength): BERNILAI TINGGI bila N>=2
+    dan mean|ret60| >= 0,40% — diukur dari BESARAN gerak, bukan arah
+    (arah belum bisa diklaim dengan N sekecil ini); N selalu ditampilkan.
+  - Hari tanpa event menampilkan preview event berikut, bukan kosong.
 """
 import html
 import json
@@ -1352,11 +1362,52 @@ next_week_events = [e for e in all_events
 # --- Dialog analisa (tombol -> jendela modal) ---
 @st.dialog("📊 Analisa Harian", width="large")
 def dialog_harian():
-    rows = db_event_rows(today_wita.isoformat(), today_wita.isoformat())
-    measured = [r for r in rows if r["ret60"] is not None]
     st.markdown(f"**{HARI[today_wita.weekday()]}, {today_wita.day} {BULAN[today_wita.month-1]} "
-                f"{today_wita.year}** — {len(today_events)} event USD medium/high, "
-                f"{len(measured)} sudah terukur respon ±1 jamnya.")
+                f"{today_wita.year}** — {len(today_events)} event USD medium/high.")
+    # Makro hari ini: narasi minggu berjalan
+    nar = (weekly_narrative or {}).get(week_start.isoformat())
+    if nar and nar.get("macro"):
+        st.markdown(f"**Makro minggu ini — {nar.get('theme', '')}:** {nar['macro']}")
+    else:
+        st.markdown("_Narasi makro minggu ini belum ditulis._")
+    rows = db_event_rows(today_wita.isoformat(), today_wita.isoformat())
+    ret60 = {r["title"]: r["ret60"] for r in rows}
+    todays = filt(today_events)
+    if todays:
+        for e in todays:
+            dbt = db_title_for(e.get("title") or "")
+            dt = parse_utc(e.get("event_time_utc"))
+            st.markdown(f"### {e.get('title')} — {fmt_dt_wita(dt) if dt else '—'}")
+            st.markdown(strength_line(dbt))
+            actual_num, fc_num, _ = event_actual(e, actuals)
+            if actual_num is not None:
+                d = deviation_info(dbt, actual_num, fc_num, surprises)
+                r60 = ret60.get(dbt)
+                r60_txt = f"{r60:+.2f}%" if r60 is not None else "belum terukur"
+                z_txt = f" (z={d['z']:+.1f}σ)" if d and d["z"] is not None else ""
+                arah = ("menekan" if (d and d["direction"] == "down")
+                        else ("mendukung" if (d and d["direction"] == "up")
+                              else "netral"))
+                st.markdown(
+                    f"**Pasca-rilis:** actual **{fmt_actual(actual_num, e.get('forecast'))}** "
+                    f"vs forecast {esc(e.get('forecast') or '—')} · "
+                    f"respon emas ±1 jam **{r60_txt}**{z_txt} · "
+                    f"arah implisit emas: **{arah}**.")
+            else:
+                st.markdown(
+                    f"**Pra-rilis:** konsensus **{esc(e.get('forecast') or 'belum terbit')}** "
+                    f"vs previous {esc(e.get('previous') or '—')}.")
+                st.markdown(scenario_text(dbt))
+    else:
+        # Hari tanpa event: preview event berikut, bukan kosong.
+        st.markdown("**Hari ini tidak ada event USD medium/high.** "
+                    "Yang perlu diperhatikan:")
+        for e in upcoming[:2]:
+            dbt = db_title_for(e.get("title") or "")
+            dt = parse_utc(e.get("event_time_utc"))
+            st.markdown(f"- **{e.get('title')}** — {fmt_dt_wita(dt) if dt else '—'} · "
+                        f"konsensus {esc(e.get('forecast') or 'belum terbit')} · "
+                        f"{strength_line(dbt)}")
     upcoming_today = [e for e in upcoming
                       if _wita_d(e) == today_wita and e.get("impact") == "High"]
     if upcoming_today:
@@ -1365,8 +1416,6 @@ def dialog_harian():
                 f"snapshot kolam Tahap 2 (pool disapu + pool target, toleransi "
                 f"0,25×ATR) dari chart-mu sendiri — gerakan pertama pasca-rilis "
                 f"dibaca sebagai sweep, bukan keputusan.")
-    render_event_list(filt(today_events), now_utc, actuals, typical, surprises,
-                      speech_map, speaker_stats)
 
 
 @st.dialog("📈 Analisa Mingguan", width="large")
@@ -1378,6 +1427,39 @@ def dialog_mingguan():
                 f"{BULAN[week_start.month-1]} {week_start.year}** — "
                 f"{len(rows)} event tercatat di DB, {len(done)} sudah rilis "
                 f"dengan actual.")
+    # Tema + narasi makro minggu ini
+    nar = (weekly_narrative or {}).get(ws)
+    if nar:
+        if nar.get("theme"):
+            st.markdown(f"**Tema: {nar['theme']}**")
+        if nar.get("macro"):
+            st.markdown(f"**Makro:** {nar['macro']}")
+        for m in nar.get("micro", []):
+            st.markdown(f"- **{m.get('title', '')}:** {m.get('text', '')}")
+    else:
+        st.markdown("_Narasi makro minggu ini belum ditulis._")
+    # Pra-rilis: semua event minggu ini, BERNILAI TINGGI di atas
+    tier_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "none": 3}
+    week_evs = sorted(
+        filt(week_events),
+        key=lambda e: tier_rank[strength_label(db_title_for(e.get("title") or ""))[0]])
+    if week_evs:
+        st.markdown("### Pra-rilis — semua event minggu ini")
+        for e in week_evs:
+            dbt = db_title_for(e.get("title") or "")
+            dt = parse_utc(e.get("event_time_utc"))
+            actual_num, _fc_num, _ = event_actual(e, actuals)
+            st.markdown(f"**{e.get('title')}** — {fmt_dt_wita(dt) if dt else '—'} · "
+                        f"{strength_line(dbt)}")
+            if actual_num is not None:
+                st.markdown(f"Sudah rilis: actual "
+                            f"**{fmt_actual(actual_num, e.get('forecast'))}** "
+                            f"vs forecast {esc(e.get('forecast') or '—')}.")
+            else:
+                st.markdown(f"Konsensus **{esc(e.get('forecast') or 'belum terbit')}** "
+                            f"vs previous {esc(e.get('previous') or '—')}. "
+                            f"{scenario_text(dbt)}")
+    # Pasca-rilis: tabel + bacaan gabungan
     if done:
         lines = ["| Event | Actual | Forecast | ±1 jam |",
                  "|---|---|---|---|"]
@@ -1389,6 +1471,10 @@ def dialog_mingguan():
         st.markdown("\n".join(lines))
         st.caption("Respon ±1 jam = GC=F, proksi XAUUSD · N kecil = data awal, "
                    "belum stabil.")
+        read = combined_read(rows, "minggu ini")
+        if read:
+            st.markdown("---")
+            st.markdown(read)
     else:
         st.info("Belum ada rilis minggu ini yang tercatat actual-nya di DB.")
     st.markdown("---")
@@ -1411,6 +1497,7 @@ def dialog_bulanan():
         next_first = first.replace(month=first.month + 1)
     last_day = next_first - timedelta(days=1)
     cur = first - timedelta(days=first.weekday())
+    month_rows_all = []
     while cur <= last_day:
         ws = cur
         we = min(cur + timedelta(days=6), last_day)
@@ -1425,6 +1512,10 @@ def dialog_bulanan():
                 st.markdown("_Alasan minggu ini belum ditulis — minggu belum tutup "
                             "atau angkanya belum terverifikasi._")
             rows = db_event_rows(ws.isoformat(), we.isoformat())
+            month_rows_all.extend(rows)
+            read = combined_read(rows, "minggu ini")
+            if read:
+                st.markdown(read)
             if rows:
                 lines = ["| Event | Actual | Forecast | ±1 jam | ±4 jam |",
                          "|---|---|---|---|---|"]
@@ -1438,6 +1529,20 @@ def dialog_bulanan():
             else:
                 st.markdown("_Belum ada event tercatat minggu ini._")
         cur += timedelta(days=7)
+    # Penutup bulan: arah bersih + event paling berpengaruh
+    st.markdown("---")
+    st.markdown(f"### Penutup bulan — {BULAN[now_wita.month-1]} {now_wita.year}")
+    read_m = combined_read(month_rows_all, "bulan ini")
+    if read_m:
+        st.markdown(read_m)
+        measured = [r for r in month_rows_all if r["ret60"] is not None]
+        if measured:
+            big = max(measured, key=lambda r: abs(r["ret60"]))
+            st.markdown(f"Event paling berpengaruh bulan ini: **{big['title']}** "
+                        f"(gerak emas ±1 jam {big['ret60']:+.2f}%, "
+                        f"actual {big['actual']:g} vs forecast {big['forecast']:g}).")
+    else:
+        st.markdown("_Belum ada rilis bulan ini yang tercatat actual-nya._")
 
 
 col_d1, col_d2, col_d3 = st.columns(3)
