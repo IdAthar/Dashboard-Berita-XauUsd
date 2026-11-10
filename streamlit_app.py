@@ -51,6 +51,13 @@ Tambahan 9 Nov 2026 (Analisa Fundamental v2, SPEC_Analisa_Fundamental_v2.md):
 # DB, CPI y/y + estimasi model berlabel belum tervalidasi); penutup
 # Bulanan menampilkan SPDR + arus bank sentral. Nilai xaudaily = revisi
 # terbaru; FRED vintage tetap otoritas first print.
+
+# Nowcast Cleveland Fed v3 (10 Nov 2026): dialog Harian menampilkan kotak
+# "Nowcast Cleveland Fed" pra-rilis untuk CPI/PCE (nowcast + vintage +
+# selisih vs konsensus WSJ dalam bp + jalur nowcast + 3 skenario) dan
+# perbandingan tiga arah pasca-rilis (actual vs WSJ vs nowcast final).
+# Nowcast = model estimate (bukan konsensus, bukan actual); WSJ tetap
+# otoritas konsensus, FRED tetap otoritas actual first-print.
 import html
 import json
 import os
@@ -83,6 +90,14 @@ WEEKLY_NARRATIVE_PATH = os.path.join(HERE, "weekly_narrative.json")
 # tetap otoritas first print di DB; beda = revisi, bukan kesalahan.
 XAUDAILY_URL = "https://xaudaily.com/readings.en.json?src=muse-newsapp"
 XAUDAILY_PATH = os.path.join(HERE, "data", "xaudaily_readings.json")
+# Nowcast Cleveland Fed (tanpa key/login; wajib User-Agent browser —
+# fetcher generik kena 403). File JSON sumber ~7,7 MB, 161 frame bulanan;
+# kolektor cleveland_nowcast.py menyimpan hasil parse ringkasnya.
+CLEVELAND_URL = ("https://www.clevelandfed.org/-/media/files/webcharts/"
+                 "inflationnowcasting/nowcast_month.json?sc_lang=en")
+CLEVELAND_PATH = os.path.join(HERE, "data", "cleveland_nowcast.json")
+CLEVELAND_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 WITA = timezone(timedelta(hours=8))  # GMT+8
 
@@ -739,6 +754,274 @@ def load_xaudaily():
     except (OSError, ValueError):
         pass
     return None, "tidak tersedia"
+
+
+# ----------------------------------------------------------------------------
+# Nowcast Cleveland Fed (v3) — mirror parser kolektor cleveland_nowcast.py
+# ----------------------------------------------------------------------------
+NOWCAST_SERIES = {
+    "CPI (headline m/m)": "CPI",
+    "CPI (core m/m)": "Core CPI",
+    "PCE (m/m)": "PCE",
+    "Core PCE (m/m)": "Core PCE",
+}
+_NOWCAST_NAMES = ("CPI Inflation", "Core CPI Inflation",
+                  "PCE Inflation", "Core PCE Inflation")
+_NOWCAST_SHORT = {"CPI Inflation": "CPI", "Core CPI Inflation": "Core CPI",
+                  "PCE Inflation": "PCE", "Core PCE Inflation": "Core PCE"}
+
+
+def _nowcast_resolve_date(target_month, label):
+    """'MM/DD' -> ISO date (label bisa di bulan target / bulan berikut)."""
+    try:
+        mm, dd = label.split("/")
+        m, d = int(mm), int(dd)
+    except (ValueError, AttributeError):
+        return None
+    y, tm = int(target_month[:4]), int(target_month[5:7])
+    if m == tm:
+        yy = y
+    elif m == tm % 12 + 1:
+        yy, m2 = (y + 1, 1) if tm == 12 else (y, tm + 1)
+        m = m2
+    else:
+        return None
+    try:
+        return f"{yy:04d}-{m:02d}-{d:02d}"
+    except ValueError:
+        return None
+
+
+def _parse_nowcast_frames(raw):
+    """Raw JSON Cleveland -> {frames: {target_month: {series: {...}}}}.
+
+    Nilai = MoM % (0,2421 = 0,24%). Final pre-release nowcast = nilai
+    terakhir tidak kosong di frame. Frame/seri kosong dilewati."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("JSON bukan list atau kosong")
+    frames = {}
+    for frame in raw:
+        if not isinstance(frame, dict):
+            continue
+        sub = (frame.get("chart") or {}).get("subcaption") or ""
+        try:
+            y, m = sub.split("-")
+            target = f"{int(y):04d}-{int(m):02d}"
+        except (ValueError, AttributeError):
+            continue
+        cats = [c.get("label", "") for c in
+                frame.get("categories", [{}])[0].get("category", [])]
+        entry = {}
+        for name in _NOWCAST_NAMES:
+            ds = next((s for s in frame.get("dataset", [])
+                       if s.get("seriesname") == name), None)
+            if ds is None:
+                continue
+            vals = []
+            for i, pt in enumerate(ds.get("data", [])):
+                v = (pt or {}).get("value")
+                if v in ("", None):
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                date = (_nowcast_resolve_date(target, cats[i])
+                        if i < len(cats) else None)
+                vals.append((date, fv))
+            if not vals:
+                continue
+            (fd, fval), (ld, lval) = vals[0], vals[-1]
+            diff = lval - fval
+            direction = ("naik" if diff >= 0.02 else
+                         "turun" if diff <= -0.02 else "stabil")
+            entry[_NOWCAST_SHORT[name]] = {
+                "nowcast": lval, "vintage": ld,
+                "first_value": fval, "first_date": fd,
+                "direction": direction}
+        if entry:
+            frames[target] = entry
+    if not frames:
+        raise ValueError("tidak ada frame yang bisa di-parse")
+    from datetime import datetime as _dt
+    return {"fetched_at": _dt.now(timezone.utc).isoformat(),
+            "source": "Federal Reserve Bank of Cleveland, Inflation Nowcasting",
+            "frames": frames}
+
+
+@st.cache_data(ttl=1800)
+def load_cleveland():
+    """(data, sumber) — live fetch diutamakan, fallback file bundel.
+
+    sumber: 'live' | 'bundel <fetched_at>' | 'tidak tersedia'.
+    Live gagal (timeout/HTTP 403/validasi) -> file data/cleveland_nowcast.json
+    yang di-push terakhir. Keduanya gagal -> (None, 'tidak tersedia')."""
+    try:
+        req = urllib.request.Request(
+            CLEVELAND_URL, headers={"User-Agent": CLEVELAND_UA})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = json.load(r)
+        parsed = _parse_nowcast_frames(raw)
+        if parsed.get("frames"):
+            return parsed, "live"
+    except Exception:
+        pass
+    try:
+        with open(CLEVELAND_PATH) as f:
+            parsed = json.load(f)
+        if isinstance(parsed, dict) and parsed.get("frames"):
+            return parsed, f"bundel {parsed.get('fetched_at') or 'tanpa tanggal'}"
+    except (OSError, ValueError):
+        pass
+    return None, "tidak tersedia"
+
+
+def _target_month(d):
+    """Bulan data yang dirilis: CPI/PCE rilis di bulan M untuk data M-1."""
+    if d is None:
+        return None
+    if d.month == 1:
+        return f"{d.year - 1:04d}-12"
+    return f"{d.year:04d}-{d.month - 1:02d}"
+
+
+def _fmt_vintage(iso):
+    """'2026-11-05' -> '5 Nov 2026'."""
+    if not iso:
+        return "—"
+    try:
+        y, m, d = int(iso[:4]), int(iso[5:7]), int(iso[8:10])
+        return f"{d} {BULAN[m - 1]} {y}"
+    except (ValueError, IndexError):
+        return iso
+
+
+def nowcast_entry(cleveland_data, dbt, dt_utc):
+    """Entri nowcast final untuk satu event (dbt + tanggal UTC event).
+
+    None bila bukan event CPI/PCE, tanggal tak pasti, atau frame/seri
+    tidak ada di data."""
+    if not cleveland_data or not dbt or dt_utc is None:
+        return None
+    key = NOWCAST_SERIES.get(dbt)
+    if not key:
+        return None
+    frame = (cleveland_data.get("frames") or {}).get(
+        _target_month(dt_utc.astimezone(WITA).date()))
+    if not frame:
+        return None
+    return frame.get(key)
+
+
+def _nowcast_gap_bp(entry, forecast_num):
+    """Selisih nowcast vs konsensus dalam bp (int, pembulatan). None bila
+    forecast belum terbit."""
+    if entry is None or forecast_num is None:
+        return None
+    return round((entry["nowcast"] - forecast_num) * 100)
+
+
+def nowcast_pre_lines(cleveland_data, dbt, dt_utc, forecast_num):
+    """Baris kotak 'Nowcast Cleveland Fed' pra-rilis (markdown).
+
+    [] bila bukan event CPI/PCE. Bila data/frame tidak ada, satu baris
+    'tidak tersedia' — dialog lain tetap jalan."""
+    if dbt not in NOWCAST_SERIES:
+        return []
+    entry = nowcast_entry(cleveland_data, dbt, dt_utc)
+    if entry is None:
+        return ["_Nowcast Cleveland Fed tidak tersedia "
+                "(fetch gagal / belum ada frame untuk rilis ini)._"]
+    nc = entry["nowcast"]
+    vint = _fmt_vintage(entry.get("vintage"))
+    lines = []
+    if forecast_num is not None:
+        bp = _nowcast_gap_bp(entry, forecast_num)
+        lines.append(
+            f"**Nowcast Cleveland Fed (model estimate, vintage {vint}):** "
+            f"**{nc:.2f}%** vs konsensus WSJ {forecast_num:.2f}% "
+            f"(**{bp:+d} bp**).")
+    else:
+        lines.append(
+            f"**Nowcast Cleveland Fed (model estimate, vintage {vint}):** "
+            f"**{nc:.2f}%** vs konsensus WSJ belum terbit.")
+    lines.append(
+        f"Jalur nowcast: {entry['first_value']:.2f}% "
+        f"({_fmt_vintage(entry.get('first_date'))}) → {nc:.2f}% ({vint}) — "
+        f"{entry['direction']}.")
+    if forecast_num is not None:
+        fc = forecast_num
+        if bp is not None and bp < 0:
+            likely = (f"Nowcast {abs(bp)} bp DI BAWAH konsensus — skenario "
+                     f"lunak lebih mungkin (model estimate, bukan prediksi).")
+        elif bp is not None and bp > 0:
+            likely = (f"Nowcast {bp} bp DI ATAS konsensus — skenario panas "
+                     f"lebih mungkin (model estimate, bukan prediksi).")
+        else:
+            likely = "Nowcast sama dengan konsensus."
+        lines.append(
+            f"Skenario: lunak (actual &lt; {fc:.2f}%) → hike Desember "
+            f"diragukan → textbook: emas didukung · sesuai (actual = "
+            f"{fc:.2f}%) → hike tetap di harga → netral · panas (actual &gt; "
+            f"{fc:.2f}%) → hike makin terkunci → textbook: emas tertekan. "
+            f"{likely}")
+    if "cpi" in (dbt or "").lower():
+        lines.append(
+            "_Arah emas di atas adalah implikasi textbook (kanal USD), bukan "
+            "garansi — data event-study kita: CPI core hanya 1 dari 3 surprise "
+            "yang searah dengan gerak emas ±1 jam._")
+    else:
+        lines.append(
+            "_Arah emas di atas adalah implikasi textbook (kanal USD), bukan "
+            "garansi — arah tidak bisa diklaim dari data event-study kita "
+            "(N kecil)._")
+    return lines
+
+
+def nowcast_post_lines(cleveland_data, dbt, dt_utc, actual_num, forecast_num):
+    """Baris perbandingan tiga arah pasca-rilis (markdown).
+
+    [] bila bukan event CPI/PCE atau actual/forecast belum ada. Bagian emas
+    (ret60/z/direction) TIDAK disentuh — ini baris tambahan."""
+    if dbt not in NOWCAST_SERIES or actual_num is None or forecast_num is None:
+        return []
+    entry = nowcast_entry(cleveland_data, dbt, dt_utc)
+    if entry is None:
+        return ["_Nowcast Cleveland Fed tidak tersedia untuk rilis ini._"]
+    nc = entry["nowcast"]
+    d_fc = (actual_num - forecast_num) * 100
+    d_nc = (actual_num - nc) * 100
+    lines = [
+        f"**Perbandingan tiga arah:** actual **{actual_num:.2f}%** vs "
+        f"konsensus WSJ {forecast_num:.2f}% ({d_fc:+.0f} bp) vs nowcast "
+        f"final Cleveland Fed {nc:.2f}% ({d_nc:+.0f} bp, vintage "
+        f"{_fmt_vintage(entry.get('vintage'))})."]
+    if abs(abs(d_nc) - abs(d_fc)) < 0.5:
+        lines.append("Nowcast dan konsensus **seri** (selisih kedekatan "
+                     "< 0,5 bp).")
+    elif abs(d_nc) < abs(d_fc):
+        lines.append("Nowcast **lebih dekat** ke actual daripada konsensus.")
+    else:
+        lines.append("Konsensus **lebih dekat** ke actual daripada nowcast.")
+    return lines
+
+
+def nowcast_week_line(cleveland_data, dbt, dt_utc, forecast_num):
+    """Satu baris ringkas untuk dialog Mingguan, atau None bila tidak ada
+    data/frame (Mingguan tidak menampilkan baris gagal)."""
+    if dbt not in NOWCAST_SERIES:
+        return None
+    entry = nowcast_entry(cleveland_data, dbt, dt_utc)
+    if entry is None:
+        return None
+    vint = _fmt_vintage(entry.get("vintage"))
+    if forecast_num is not None:
+        bp = _nowcast_gap_bp(entry, forecast_num)
+        return (f"Nowcast Cleveland Fed: **{entry['nowcast']:.2f}%** "
+                f"(vintage {vint}) vs konsensus WSJ {forecast_num:.2f}% "
+                f"(**{bp:+d} bp**).")
+    return (f"Nowcast Cleveland Fed: **{entry['nowcast']:.2f}%** "
+            f"(vintage {vint}) vs konsensus WSJ belum terbit.")
 
 
 def _latest_actual(actuals, title):
@@ -1419,6 +1702,7 @@ week_ahead = load_week_ahead()
 monthly_notes = load_monthly_notes()
 weekly_narrative = load_weekly_narrative()
 xaudaily_data, xaudaily_src = load_xaudaily()
+cleveland_data, cleveland_src = load_cleveland()
 
 # Override forecast kartu minggu depan dengan median WSJ (bila cocok
 # judul kanonis + tanggal WITA). Kartu tetap menampilkan badge sumber WSJ.
@@ -1535,11 +1819,17 @@ def dialog_harian():
                     f"vs forecast {esc(e.get('forecast') or '—')} · "
                     f"respon emas ±1 jam **{r60_txt}**{z_txt} · "
                     f"arah implisit emas: **{arah}**.")
+                for ln in nowcast_post_lines(
+                        cleveland_data, dbt, dt, actual_num, fc_num):
+                    st.markdown(ln)
             else:
                 st.markdown(
                     f"**Pra-rilis:** konsensus **{esc(e.get('forecast') or 'belum terbit')}** "
                     f"vs previous {esc(e.get('previous') or '—')}.")
                 st.markdown(scenario_text(dbt))
+                for ln in nowcast_pre_lines(
+                        cleveland_data, dbt, dt, fc_num):
+                    st.markdown(ln)
     else:
         # Hari tanpa event: preview event berikut, bukan kosong.
         st.markdown("**Hari ini tidak ada event USD medium/high.** "
@@ -1607,6 +1897,9 @@ def dialog_mingguan():
                 st.markdown(f"Konsensus **{esc(e.get('forecast') or 'belum terbit')}** "
                             f"vs previous {esc(e.get('previous') or '—')}. "
                             f"{scenario_text(dbt)}")
+                wl = nowcast_week_line(cleveland_data, dbt, dt, _fc_num)
+                if wl:
+                    st.markdown(wl)
     # Pasca-rilis: tabel + bacaan gabungan
     if done:
         lines = ["| Event | Actual | Forecast | ±1 jam |",
@@ -1751,6 +2044,8 @@ st.markdown(
     'N&lt;5 = data awal, belum stabil<br>'
     'Cross-check: XAU Daily (xaudaily.com, CC BY 4.0) — nilai revisi terbaru, '
     'bukan first print<br>'
+    'Nowcast: Federal Reserve Bank of Cleveland, Inflation Nowcasting — '
+    'model estimate, bukan konsensus<br>'
     'Angka = hasil ukur, bukan ramalan · data, bukan sinyal.'
     '</div>',
     unsafe_allow_html=True,
