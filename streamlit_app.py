@@ -58,6 +58,11 @@ Tambahan 9 Nov 2026 (Analisa Fundamental v2, SPEC_Analisa_Fundamental_v2.md):
 # perbandingan tiga arah pasca-rilis (actual vs WSJ vs nowcast final).
 # Nowcast = model estimate (bukan konsensus, bukan actual); WSJ tetap
 # otoritas konsensus, FRED tetap otoritas actual first-print.
+
+# Fed Speaker Tracker v1 (10 Nov 2026): tab baru "Suara Fed" — kolektor
+# fed_speeches.py (pidato Board of Governors, federalreserve.gov) + skor
+# kata kunci transparan -2..+2 (bukan LLM) + delta vs mean 90h + alert
+# |delta| >= 1,0. Hanya gubernur; presiden regional = Fase 2.
 import html
 import json
 import os
@@ -98,6 +103,15 @@ CLEVELAND_URL = ("https://www.clevelandfed.org/-/media/files/webcharts/"
 CLEVELAND_PATH = os.path.join(HERE, "data", "cleveland_nowcast.json")
 CLEVELAND_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+# Fed Speaker Tracker v1 (10 Nov 2026): pidato Board of Governors
+# (federalreserve.gov, teks penuh). Kolektor fed_speeches.py menulis
+# data/fed_speeches.json; app memuatnya live-first dari raw GitHub
+# (hasil push cron 6 jam) lalu fallback file bundel. Skor = kata kunci
+# transparan, BUKAN penilaian LLM. Hanya gubernur; 12 presiden
+# regional belum masuk (Fase 2).
+FED_SPEECHES_RAW_URL = ("https://raw.githubusercontent.com/IdAthar/"
+                        "Dashboard-Berita-XauUsd/main/data/fed_speeches.json")
+FED_SPEECHES_PATH = os.path.join(HERE, "data", "fed_speeches.json")
 
 WITA = timezone(timedelta(hours=8))  # GMT+8
 
@@ -874,6 +888,190 @@ def load_cleveland():
     except (OSError, ValueError):
         pass
     return None, "tidak tersedia"
+
+
+# ----------------------------------------------------------------------------
+# Fed Speaker Tracker v1 (10 Nov 2026) — pidato Board of Governors
+# ----------------------------------------------------------------------------
+# Leksikon skor kata kunci — CERMIN fed_speeches.py (HAWKISH / DOVISH).
+# Bila leksikon kolektor berubah, cermin ini wajib ikut berubah.
+# Skor: raw = |hawkish| - |dovish| (frasa BERBEDA yang cocok);
+# skor = clamp(raw * 0,5, -2, +2). Bukan penilaian LLM.
+FED_LEXICON_HAWKISH = [
+    "50 basis point", "credibility at risk", "raise the policy rate",
+    "raise interest rates", "rate hike", "hiking", "further tightening",
+    "tighten monetary policy", "restrictive", "inflation remains elevated",
+    "inflation is too high", "inflation has been too high",
+    "inflation too high", "above our 2 percent goal",
+    "above the 2 percent goal", "more work to do",
+    "upside risks to inflation", "persistent inflation",
+    "stronger policy move", "additional rate increases",
+    "further rate increases", "rates need to rise",
+]
+FED_LEXICON_DOVISH = [
+    "cut the policy rate", "cut interest rates", "rate cut",
+    "lower interest rates", "lower the policy rate", "ease monetary policy",
+    "easing", "accommodative", "signs of disinflation", "disinflation",
+    "inflation is falling", "inflation has fallen", "inflation moderating",
+    "inflation has moderated", "avoid overtightening",
+    "risk of overtightening", "risking a recession", "hold rates steady",
+    "keep rates unchanged", "pause", "downside risks to growth",
+    "risks to employment", "labor market softening",
+    "weakness in the labor market", "unemployment rising",
+    "patient approach", "be patient", "gradual normalization",
+]
+
+
+@st.cache_data(ttl=3600)
+def load_fed_speeches():
+    """(data, sumber) — live-first dari raw GitHub, fallback file bundel.
+
+    sumber: 'live (GitHub)' | 'bundel <fetched_at>' | 'tidak tersedia'.
+    Live = data/fed_speeches.json hasil push cron 6 jam (kolektor
+    fed_speeches.py). Keduanya gagal -> (None, 'tidak tersedia')."""
+    try:
+        req = urllib.request.Request(
+            FED_SPEECHES_RAW_URL, headers={"User-Agent": "Muse-newsapp/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.load(r)
+        if isinstance(data, dict) and isinstance(data.get("speeches"), list):
+            return data, "live (GitHub)"
+    except Exception:
+        pass
+    try:
+        with open(FED_SPEECHES_PATH) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("speeches"), list):
+            return data, f"bundel {data.get('fetched_at') or 'tanpa tanggal'}"
+    except (OSError, ValueError):
+        pass
+    return None, "tidak tersedia"
+
+
+def _fmt_fed_date(iso):
+    """'2026-11-10' -> '10 Nov 2026'."""
+    if not iso:
+        return "—"
+    try:
+        y, m, d = int(iso[:4]), int(iso[5:7]), int(iso[8:10])
+        return f"{d} {BULAN[m - 1]} {y}"
+    except (ValueError, IndexError):
+        return iso
+
+
+def _fed_score_txt(score, label):
+    if score is None:
+        return "—"
+    return f"{score:+.1f} {label}"
+
+
+def render_fed_tab(fed_data, fed_src):
+    """Tab 'Suara Fed': pidato terbaru + stance per pembicara + metode.
+
+    Tidak mengubah tab/dialog lain. Tanpa data -> 'tidak tersedia'."""
+    st.markdown("### 🎙️ Suara Fed — pidato Board of Governors")
+    st.caption("Skor kata kunci transparan, bukan penilaian LLM · "
+               "skor belum terbukti memprediksi emas (backtest = Fase 2).")
+    if not fed_data:
+        st.info("Data pidato Fed tidak tersedia — kolektor gagal atau file "
+                "belum ter-push. Tidak dikarang.", icon="ℹ️")
+        return
+    speeches = fed_data.get("speeches") or []
+    speakers = fed_data.get("speakers") or {}
+    st.caption(f"Sumber: {fed_data.get('source', 'federalreserve.gov')} · "
+               f"diambil {fed_src} · {len(speeches)} pidato tahun "
+               f"{(fed_data.get('index_url') or '').split('/')[-1][:4]} · "
+               f"hanya gubernur — 12 presiden regional belum masuk.")
+    # (a) Pidato terbaru
+    st.markdown("**Pidato terbaru** (15 teratas)")
+    if not speeches:
+        st.info("Belum ada pidato tercatat.")
+    else:
+        rows = ["| Tanggal | Pembicara | Judul | Skor | Δ vs mean 90h |",
+                "|---|---|---|---|---|"]
+        for s in speeches[:15]:
+            title = (s.get("title") or "—").replace("|", "/")
+            link = s.get("url") or ""
+            title_md = f"[{title}]({link})" if link else title
+            d90 = s.get("delta90")
+            if d90 is None:
+                d90_txt = "—"
+            else:
+                d90_txt = f"{d90:+.1f}" + (" ⚠️" if s.get("alert") else "")
+            rows.append(
+                f"| {_fmt_fed_date(s.get('date'))} | {esc(s.get('speaker') or '—')} "
+                f"| {title_md} | {_fed_score_txt(s.get('score'), s.get('label'))} "
+                f"| {d90_txt} |")
+        st.markdown("\n".join(rows))
+        st.caption("⚠️ = |Δ vs mean 90h| ≥ 1,0 (aturan Fed Chirp, referensi) — "
+                   "tanda perubahan nada, bukan sinyal trading. "
+                   "Klik judul untuk teks penuh di federalreserve.gov.")
+        # Evidence pidato terbaru yang punya skor
+        latest_scored = next((s for s in speeches
+                              if s.get("score") is not None
+                              and s.get("evidence")), None)
+        if latest_scored:
+            ev = ", ".join(f"“{e}”" for e in latest_scored["evidence"])
+            st.caption(f"Bukti frasa pidato terbaru "
+                       f"({latest_scored.get('speaker')}, "
+                       f"{_fmt_fed_date(latest_scored.get('date'))}): {ev}. "
+                       f"Pidato tanpa frasa kunci yang cocok = skor 0 netral.")
+    # (b) Stance per pembicara
+    st.markdown("**Stance per pembicara** (90 hari terakhir)")
+    if not speakers:
+        st.info("Belum ada ringkasan pembicara.")
+    else:
+        rows = ["| Pembicara | n (90h) | Mean 90h | Pidato terakhir |",
+                "|---|---|---|---|"]
+        for sp in sorted(speakers):
+            s = speakers[sp]
+            latest = s.get("latest") or {}
+            mean90 = s.get("mean90")
+            mean_txt = f"{mean90:+.2f}" if mean90 is not None else "—"
+            lsc = latest.get("score")
+            lsc_txt = f"{lsc:+.1f}" if lsc is not None else "—"
+            rows.append(
+                f"| {esc(s.get('speaker_full') or sp)} | {s.get('n90', 0)} "
+                f"| {mean_txt} | {_fmt_fed_date(latest.get('date'))} "
+                f"({lsc_txt}) |")
+        st.markdown("\n".join(rows))
+        st.caption("Mean 90h = rata-rata skor pidato pembicara itu dalam 90 "
+                   "hari terakhir (vs pidato terbaru di dataset). "
+                   "n = jumlah pidato dalam 90 hari itu.")
+    # (c) Metode + leksikon
+    with st.expander("📖 Cara skor dihitung (metode + leksikon)"):
+        st.markdown(
+            "**Skor kata kunci, bukan penilaian LLM.** Setiap pidato dibaca "
+            "teks penuhnya (halaman .htm federalreserve.gov; pidato yang "
+            "hanya PDF dicatat 'teks belum terambil' dan tidak diskoring). "
+            "Dihitung frasa BERBEDA yang cocok dari leksikon di bawah "
+            "(kemunculan berulang tidak dihitung dua kali — pidato panjang "
+            "tidak otomatis lebih ekstrem). "
+            "Skor = (jumlah frasa hawkish − jumlah frasa dovish) × 0,5, "
+            "dibatasi −2 sampai +2. "
+            "Tiap skor menampilkan maks 3 frasa bukti yang ditemukan; "
+            "pidato tanpa frasa kunci yang cocok = 0 netral, bukan penilaian "
+            "tersembunyi.\n\n"
+            "**Δ vs mean 90h** = skor pidato itu dikurangi rata-rata skor "
+            "pidato pembicara yang sama dalam 90 hari SEBELUM pidato itu. "
+            "Alert ⚠️ bila |Δ| ≥ 1,0 (aturan Fed Chirp, dikutip sebagai "
+            "referensi) — artinya nada pembicara itu berubah tajam dari "
+            "biasanya, bukan ramalan arah emas.\n\n"
+            "**Batas:** hanya 6–8 gubernur Board (siapa pun yang muncul di "
+            "halaman speeches); 12 presiden regional Fed hanya menerbitkan "
+            "di situs bank masing-masing dan belum dikolek (Fase 2). "
+            "Skor ini lapisan data, sama derajatnya dengan nowcast: "
+            "dikolek, diskoring transparan, lalu diuji terhadap gerak emas "
+            "— pengujiannya (backtest event-study) adalah Fase 2, setelah "
+            "≥2 minggu koleksi live. Jangan jadikan skor ini sinyal entry.")
+        st.markdown("**Leksikon hawkish:** " +
+                    ", ".join(f"“{p}”" for p in FED_LEXICON_HAWKISH))
+        st.markdown("**Leksikon dovish:** " +
+                    ", ".join(f"“{p}”" for p in FED_LEXICON_DOVISH))
+        st.markdown("Sumber teks: Board of Governors of the Federal "
+                    "Reserve System — Speeches (federalreserve.gov). "
+                    "Skor pihak ketiga (FedLock, Fed Chirp) hanya "
+                    "cross-check, bukan sumber skor ini.")
 
 
 def _target_month(d):
@@ -1703,6 +1901,7 @@ monthly_notes = load_monthly_notes()
 weekly_narrative = load_weekly_narrative()
 xaudaily_data, xaudaily_src = load_xaudaily()
 cleveland_data, cleveland_src = load_cleveland()
+fed_data, fed_src = load_fed_speeches()
 
 # Override forecast kartu minggu depan dengan median WSJ (bila cocok
 # judul kanonis + tanggal WITA). Kartu tetap menampilkan badge sumber WSJ.
@@ -2000,10 +2199,11 @@ with col_d3:
     if st.button("🗓️ Analisa Bulanan", use_container_width=True):
         dialog_bulanan()
 
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     f"Hari ini ({len(filt(today_events))})",
     f"Minggu ini ({len(filt(week_events))})",
     f"Bulan ini ({len(filt(month_events))})",
+    "Suara Fed",
 ])
 
 with tab1:
@@ -2032,6 +2232,9 @@ with tab3:
         st.info("Belum ada event tercatat bulan ini.")
     render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
 
+with tab4:
+    render_fed_tab(fed_data, fed_src)
+
 st.markdown(
     '<div class="foot">'
     '🟢 Actual hijau = kabar baik untuk ekonomi AS · '
@@ -2046,6 +2249,8 @@ st.markdown(
     'bukan first print<br>'
     'Nowcast: Federal Reserve Bank of Cleveland, Inflation Nowcasting — '
     'model estimate, bukan konsensus<br>'
+    'Pidato Fed: Board of Governors (federalreserve.gov) — skor kata kunci, '
+    'bukan penilaian LLM · hanya gubernur<br>'
     'Angka = hasil ukur, bukan ramalan · data, bukan sinyal.'
     '</div>',
     unsafe_allow_html=True,
