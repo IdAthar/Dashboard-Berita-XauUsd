@@ -368,9 +368,11 @@ def parse_number(raw):
 
 # Event Low-impact FF yang tetap relevan untuk XAUUSD (disorot di dossier
 # mingguan) — tetap ditampilkan dengan badge Low apa adanya, tidak di-upgrade.
+# "speak" wajib ada: pidato Fed kebanyakan Low-impact, dan brief pra-rilis
+# Suara Fed (v1.1/v1.3) butuh event ini lolos parse_event.
 GOLD_LOW_ALLOW = ("nahb", "housing start", "building permit", "pending home",
                   "adp", "case-shiller", "new home sales", "existing home sales",
-                  "pce", "payroll")
+                  "pce", "payroll", "speak")
 
 
 def parse_event(ev):
