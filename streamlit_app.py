@@ -998,6 +998,51 @@ def fed_speech_context(actuals, xaudaily_data):
     return lines
 
 
+def fed_layer_votes(stance_mean90, actuals, xaudaily_data):
+    """Arah tiap lapis pra-pidato (hawkish/dovish/netral/tanpa data).
+
+    Aturan dipublikasi di app (bukan kotak hitam):
+    - Prior pembicara: mean90 ≥ +0,30 → hawkish, ≤ −0,30 → dovish
+      (batas ±0,30 mengikuti Fed Chirp: >+0,30 = kubu hawkish).
+    - Fundamental: inflasi inti (Core CPI / Core PCE) ≥0,3%/bln →
+      hawkish (di atas laju 2%/tahun ≈ 0,17%/bln); keduanya ≤0,1% →
+      dovish; selebihnya netral.
+    - Harga pasar: odds hike Des Polymarket ≥60% → hawkish,
+      ≤40% → dovish; di antaranya netral.
+    Ini HITUNGAN LAPIS, bukan probabilitas — belum di-backtest
+    (lihat SPEC Fase 2). Jangan dibaca sebagai peluang skor."""
+    votes = {}
+    if stance_mean90 is None:
+        votes["Prior"] = "—"
+    elif stance_mean90 >= 0.3:
+        votes["Prior"] = "hawkish"
+    elif stance_mean90 <= -0.3:
+        votes["Prior"] = "dovish"
+    else:
+        votes["Prior"] = "netral"
+    _, core_cpi = _latest_actual(actuals or {}, "CPI (core m/m)")
+    _, core_pce = _latest_actual(actuals or {}, "Core PCE (m/m)")
+    vals = [v for v in (core_cpi, core_pce) if v is not None]
+    if any(v >= 0.3 for v in vals):
+        votes["Fundamental"] = "hawkish"
+    elif vals and all(v <= 0.1 for v in vals):
+        votes["Fundamental"] = "dovish"
+    else:
+        votes["Fundamental"] = "netral"
+    pm = ((xaudaily_data or {}).get("readings", {}).get("extra", {})
+          .get("polymarket") or {})
+    odds = pm.get("hike25")
+    if odds is None:
+        votes["Pasar"] = "—"
+    elif odds >= 0.6:
+        votes["Pasar"] = "hawkish"
+    elif odds <= 0.4:
+        votes["Pasar"] = "dovish"
+    else:
+        votes["Pasar"] = "netral"
+    return votes
+
+
 def fed_upcoming_speeches(all_events, speakers, now_utc, hours=48):
     """Pidato Fed terjadwal (kalender FF) dalam `hours` jam ke depan.
 
@@ -1091,6 +1136,22 @@ def render_fed_tab(fed_data, fed_src, all_events=None, now_utc=None,
                 if react:
                     cap += f" Garis reaksi: {react}"
                 st.caption(cap)
+            votes = fed_layer_votes(
+                stance.get("mean90") if stance else None,
+                actuals, xaudaily_data)
+            arrow = {"hawkish": "▲", "dovish": "▼", "netral": "◆", "—": "–"}
+            parts = [f"{k} {arrow[v]}" for k, v in votes.items()]
+            n_h = sum(1 for v in votes.values() if v == "hawkish")
+            n_d = sum(1 for v in votes.values() if v == "dovish")
+            if n_h > n_d:
+                res = f"{n_h} lapis hawkish"
+            elif n_d > n_h:
+                res = f"{n_d} lapis dovish"
+            else:
+                res = "tidak ada arah dominan"
+            st.caption(f"Arah lapis: {' · '.join(parts)} → {res} "
+                       f"(hitungan lapis, bukan probabilitas; "
+                       f"belum di-backtest).")
     # (a) Pidato terbaru
     st.markdown("**Pidato terbaru** (15 teratas)")
     if not speeches:
