@@ -965,6 +965,39 @@ def _fed_score_txt(score, label):
     return f"{score:+.1f} {label}"
 
 
+# Garis reaksi TERVERIFIKASI (kutipan pidato/pernyataan, dgn tanggal).
+# Tanpa kutipan -> tidak ada baris. Jangan invent.
+FED_REACTION_LINES = {
+    "Waller": ("Core CPI ≥0,3% → 50bp dipertimbangkan "
+               "(pidato 10 Nov 2026)."),
+}
+
+
+def fed_speech_context(actuals, xaudaily_data):
+    """Konteks pra-pidato (bukan ramalan skor): fundamental AS terbaru
+    dari DB + harga pasar (odds FOMC Polymarket via xaudaily).
+    Murni agar bisa dites unit. Kembalikan list baris teks; kosong
+    bila tak ada data. Angka-angka ini membentuk ekspektasi (prior),
+    bukan menentukan skor pidato."""
+    lines = []
+    for title, label, unit in (
+            ("CPI (core m/m)", "Core CPI", "%"),
+            ("CPI (headline m/m)", "CPI headline", "%"),
+            ("Unemployment Rate", "Pengangguran", "%"),
+            ("NFP", "NFP", "K"),
+            ("Core PCE (m/m)", "Core PCE", "%")):
+        d, v = _latest_actual(actuals or {}, title)
+        if v is not None:
+            lines.append(f"{label}: {v:g}{unit} ({_fmt_fed_date(d)})")
+    pm = ((xaudaily_data or {}).get("readings", {}).get("extra", {})
+          .get("polymarket") or {})
+    if pm.get("hike25") is not None:
+        lines.append(f"Odds hike Des (Polymarket): "
+                     f"{pm['hike25'] * 100:.1f}%"
+                     + (f" ({pm.get('asOf', '')})" if pm.get("asOf") else ""))
+    return lines
+
+
 def fed_upcoming_speeches(all_events, speakers, now_utc, hours=48):
     """Pidato Fed terjadwal (kalender FF) dalam `hours` jam ke depan.
 
@@ -998,7 +1031,8 @@ def fed_upcoming_speeches(all_events, speakers, now_utc, hours=48):
     return out[:5]
 
 
-def render_fed_tab(fed_data, fed_src, all_events=None, now_utc=None):
+def render_fed_tab(fed_data, fed_src, all_events=None, now_utc=None,
+                   actuals=None, xaudaily_data=None):
     """Tab 'Suara Fed': brief pra-rilis + pidato terbaru + stance + metode.
 
     Tidak mengubah tab/dialog lain. Tanpa data -> 'tidak tersedia'.
@@ -1026,6 +1060,13 @@ def render_fed_tab(fed_data, fed_src, all_events=None, now_utc=None):
         st.caption("Tidak ada pidato Fed terjadwal 48 jam ke depan "
                    "(kalender ForexFactory).")
     else:
+        ctx = fed_speech_context(actuals, xaudaily_data)
+        st.caption("**Konteks pra-pidato — bukan ramalan skor.** "
+                   "Angka-angka ini membentuk ekspektasi (prior), bukan "
+                   "menentukan skor; skor tetap dihitung dari teks pidato "
+                   "setelah disampaikan.")
+        if ctx:
+            st.caption(" · ".join(ctx))
         for u in upcoming:
             e = u["event"]
             st.markdown(f"**{esc(e.get('title') or '—')}** — "
@@ -1040,12 +1081,16 @@ def render_fed_tab(fed_data, fed_src, all_events=None, now_utc=None):
                 latest = stance.get("latest") or {}
                 lsc = latest.get("score")
                 lsc_txt = f"{lsc:+.1f}" if lsc is not None else "—"
-                st.caption(f"Stance 90h: {mean_txt} (n={stance.get('n90', 0)}) · "
-                           f"pidato terakhir {_fmt_fed_date(latest.get('date'))} "
-                           f"skor {lsc_txt} — “{latest.get('title') or '—'}”. "
-                           f"Skor pidato ini muncul setelah teks diterbitkan "
-                           f"(biasanya saat pidato disampaikan); kolektor "
-                           f"mengecek tiap 30 menit.")
+                cap = (f"Stance 90h: {mean_txt} (n={stance.get('n90', 0)}) · "
+                       f"pidato terakhir {_fmt_fed_date(latest.get('date'))} "
+                       f"skor {lsc_txt} — “{latest.get('title') or '—'}”. "
+                       f"Skor pidato ini muncul setelah teks diterbitkan "
+                       f"(biasanya saat pidato disampaikan); kolektor "
+                       f"mengecek tiap 30 menit.")
+                react = FED_REACTION_LINES.get(u["speaker_key"] or "")
+                if react:
+                    cap += f" Garis reaksi: {react}"
+                st.caption(cap)
     # (a) Pidato terbaru
     st.markdown("**Pidato terbaru** (15 teratas)")
     if not speeches:
@@ -2297,7 +2342,8 @@ with tab3:
     render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
 
 with tab4:
-    render_fed_tab(fed_data, fed_src, all_events, now_utc)
+    render_fed_tab(fed_data, fed_src, all_events, now_utc,
+                   actuals, xaudaily_data)
 
 st.markdown(
     '<div class="foot">'
