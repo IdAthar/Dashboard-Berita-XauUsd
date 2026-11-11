@@ -927,7 +927,7 @@ def load_fed_speeches():
     """(data, sumber) — live-first dari raw GitHub, fallback file bundel.
 
     sumber: 'live (GitHub)' | 'bundel <fetched_at>' | 'tidak tersedia'.
-    Live = data/fed_speeches.json hasil push cron 6 jam (kolektor
+    Live = data/fed_speeches.json hasil push cron 30 menit (kolektor
     fed_speeches.py). Keduanya gagal -> (None, 'tidak tersedia')."""
     try:
         req = urllib.request.Request(
@@ -965,10 +965,45 @@ def _fed_score_txt(score, label):
     return f"{score:+.1f} {label}"
 
 
-def render_fed_tab(fed_data, fed_src):
-    """Tab 'Suara Fed': pidato terbaru + stance per pembicara + metode.
+def fed_upcoming_speeches(all_events, speakers, now_utc, hours=48):
+    """Pidato Fed terjadwal (kalender FF) dalam `hours` jam ke depan.
 
-    Tidak mengubah tab/dialog lain. Tanpa data -> 'tidak tersedia'."""
+    Murni (tanpa st.*) agar bisa dites unit. Judul FF berbentuk
+    'FOMC Member Waller Speaks' — nama diambil dari kata sebelum
+    'Speaks', dicocokkan ke ringkasan speakers (short name).
+    Kembalikan list dict {event, dt, speaker_key, stance}, urut waktu,
+    maks 5. Pembicara tak dikenal -> stance None (tanpa karangan)."""
+    out = []
+    if not all_events or now_utc is None:
+        return out
+    horizon = now_utc + timedelta(hours=hours)
+    for e in all_events:
+        title = (e.get("title") or "")
+        if "speak" not in title.lower():
+            continue
+        dt = parse_utc(e.get("event_time_utc"))
+        if not dt or not (now_utc < dt <= horizon):
+            continue
+        m = re.search(r"([A-Za-z][A-Za-z.'-]+)\s+Speaks", title)
+        key = None
+        if m:
+            cand = m.group(1).strip(".'")
+            for k in (speakers or {}):
+                if k.lower() == cand.lower():
+                    key = k
+                    break
+        out.append({"event": e, "dt": dt, "speaker_key": key,
+                    "stance": (speakers or {}).get(key) if key else None})
+    out.sort(key=lambda r: r["dt"])
+    return out[:5]
+
+
+def render_fed_tab(fed_data, fed_src, all_events=None, now_utc=None):
+    """Tab 'Suara Fed': brief pra-rilis + pidato terbaru + stance + metode.
+
+    Tidak mengubah tab/dialog lain. Tanpa data -> 'tidak tersedia'.
+    Skor pidato selalu SESUDAH teks diterbitkan; yang tampil sebelum
+    pidato adalah brief pra-rilis (stance pembicara sebelum pidato)."""
     st.markdown("### 🎙️ Suara Fed — pidato Board of Governors")
     st.caption("Skor kata kunci transparan, bukan penilaian LLM · "
                "skor belum terbukti memprediksi emas (backtest = Fase 2).")
@@ -982,6 +1017,35 @@ def render_fed_tab(fed_data, fed_src):
                f"diambil {fed_src} · {len(speeches)} pidato tahun "
                f"{(fed_data.get('index_url') or '').split('/')[-1][:4]} · "
                f"hanya gubernur — 12 presiden regional belum masuk.")
+    # (0) Pidato berikutnya — brief PRA-rilis. Skor pidato itu sendiri
+    # baru ada SETELAH teks diterbitkan; yang tampil di sini adalah
+    # posisi pembicara SEBELUM pidato (stance 90h + pidato terakhir).
+    st.markdown("**Pidato Fed berikutnya** (brief pra-rilis)")
+    upcoming = fed_upcoming_speeches(all_events, speakers, now_utc)
+    if not upcoming:
+        st.caption("Tidak ada pidato Fed terjadwal 48 jam ke depan "
+                   "(kalender ForexFactory).")
+    else:
+        for u in upcoming:
+            e = u["event"]
+            st.markdown(f"**{esc(e.get('title') or '—')}** — "
+                        f"{esc(fmt_dt_wita(u['dt']))}")
+            stance = u["stance"]
+            if stance is None:
+                st.caption("Pembicara belum ada di ringkasan stance "
+                           "(bukan gubernur Board / belum pernah diskoring).")
+            else:
+                mean90 = stance.get("mean90")
+                mean_txt = f"{mean90:+.2f}" if mean90 is not None else "—"
+                latest = stance.get("latest") or {}
+                lsc = latest.get("score")
+                lsc_txt = f"{lsc:+.1f}" if lsc is not None else "—"
+                st.caption(f"Stance 90h: {mean_txt} (n={stance.get('n90', 0)}) · "
+                           f"pidato terakhir {_fmt_fed_date(latest.get('date'))} "
+                           f"skor {lsc_txt} — “{latest.get('title') or '—'}”. "
+                           f"Skor pidato ini muncul setelah teks diterbitkan "
+                           f"(biasanya saat pidato disampaikan); kolektor "
+                           f"mengecek tiap 30 menit.")
     # (a) Pidato terbaru
     st.markdown("**Pidato terbaru** (15 teratas)")
     if not speeches:
@@ -2233,7 +2297,7 @@ with tab3:
     render_event_list(evs, now_utc, actuals, typical, surprises, speech_map, speaker_stats)
 
 with tab4:
-    render_fed_tab(fed_data, fed_src)
+    render_fed_tab(fed_data, fed_src, all_events, now_utc)
 
 st.markdown(
     '<div class="foot">'
