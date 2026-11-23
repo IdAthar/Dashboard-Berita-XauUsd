@@ -1,95 +1,84 @@
 {
-  "fetched_at": "2026-11-20 08:17:44 GMT+8",
+  "fetched_at": "2026-11-23 08:17:43 GMT+8",
   "source": "https://nfs.faireconomy.media/ff_calendar_thisweek.xml",
   "note": "ForexFactory unofficial feed; waktu feed = UTC, dikonversi ke WITA.",
   "events": [
     {
-      "title": "Fed Chairman Warsh Speaks",
-      "country": "USD",
-      "impact": "High",
-      "event_time_utc": "2026-11-16T17:00:00Z",
-      "event_time_wita": "2026-11-17 01:00 WITA",
-      "forecast": null,
-      "forecast_num": null,
-      "previous": null,
-      "previous_num": null
-    },
-    {
-      "title": "Core Retail Sales m/m",
-      "country": "USD",
-      "impact": "High",
-      "event_time_utc": "2026-11-17T13:30:00Z",
-      "event_time_wita": "2026-11-17 21:30 WITA",
-      "forecast": "0.4%",
-      "forecast_num": 0.4,
-      "previous": "0.9%",
-      "previous_num": 0.9
-    },
-    {
-      "title": "Retail Sales m/m",
-      "country": "USD",
-      "impact": "High",
-      "event_time_utc": "2026-11-17T13:30:00Z",
-      "event_time_wita": "2026-11-17 21:30 WITA",
-      "forecast": "0.1%",
-      "forecast_num": 0.1,
-      "previous": "0.8%",
-      "previous_num": 0.8
-    },
-    {
-      "title": "FOMC Meeting Minutes",
-      "country": "USD",
-      "impact": "High",
-      "event_time_utc": "2026-11-18T19:00:00Z",
-      "event_time_wita": "2026-11-19 03:00 WITA",
-      "forecast": null,
-      "forecast_num": null,
-      "previous": null,
-      "previous_num": null
-    },
-    {
-      "title": "Philly Fed Manufacturing Index",
+      "title": "Flash Manufacturing PMI",
       "country": "USD",
       "impact": "Medium",
-      "event_time_utc": "2026-11-19T13:30:00Z",
-      "event_time_wita": "2026-11-19 21:30 WITA",
-      "forecast": "20.6",
-      "forecast_num": 20.6,
-      "previous": "20.9",
-      "previous_num": 20.9
+      "event_time_utc": "2026-11-23T14:45:00Z",
+      "event_time_wita": "2026-11-23 22:45 WITA",
+      "forecast": "54.5",
+      "forecast_num": 54.5,
+      "previous": "56.0",
+      "previous_num": 56.0
+    },
+    {
+      "title": "Flash Services PMI",
+      "country": "USD",
+      "impact": "Medium",
+      "event_time_utc": "2026-11-23T14:45:00Z",
+      "event_time_wita": "2026-11-23 22:45 WITA",
+      "forecast": "55.6",
+      "forecast_num": 55.6,
+      "previous": "57.9",
+      "previous_num": 57.9
+    },
+    {
+      "title": "CB Consumer Confidence",
+      "country": "USD",
+      "impact": "Medium",
+      "event_time_utc": "2026-11-24T15:00:00Z",
+      "event_time_wita": "2026-11-24 23:00 WITA",
+      "forecast": "92.1",
+      "forecast_num": 92.1,
+      "previous": "91.7",
+      "previous_num": 91.7
+    },
+    {
+      "title": "Core PCE Price Index m/m",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-11-25T13:30:00Z",
+      "event_time_wita": "2026-11-25 21:30 WITA",
+      "forecast": "0.3%",
+      "forecast_num": 0.3,
+      "previous": "0.3%",
+      "previous_num": 0.3
+    },
+    {
+      "title": "Prelim GDP q/q",
+      "country": "USD",
+      "impact": "High",
+      "event_time_utc": "2026-11-25T13:30:00Z",
+      "event_time_wita": "2026-11-25 21:30 WITA",
+      "forecast": "3.5%",
+      "forecast_num": 3.5,
+      "previous": "3.4%",
+      "previous_num": 3.4
+    },
+    {
+      "title": "Prelim GDP Price Index q/q",
+      "country": "USD",
+      "impact": "Medium",
+      "event_time_utc": "2026-11-25T13:30:00Z",
+      "event_time_wita": "2026-11-25 21:30 WITA",
+      "forecast": "2.3%",
+      "forecast_num": 2.3,
+      "previous": "2.3%",
+      "previous_num": 2.3
     },
     {
       "title": "Unemployment Claims",
       "country": "USD",
       "impact": "Medium",
-      "event_time_utc": "2026-11-19T13:30:00Z",
-      "event_time_wita": "2026-11-19 21:30 WITA",
-      "forecast": "198K",
-      "forecast_num": 198.0,
-      "previous": "200K",
-      "previous_num": 200.0
-    },
-    {
-      "title": "Revised UoM Consumer Sentiment",
-      "country": "USD",
-      "impact": "Medium",
-      "event_time_utc": "2026-11-20T15:00:00Z",
-      "event_time_wita": "2026-11-20 23:00 WITA",
-      "forecast": "51.7",
-      "forecast_num": 51.7,
-      "previous": "51.0",
-      "previous_num": 51.0
-    },
-    {
-      "title": "Revised UoM Inflation Expectations",
-      "country": "USD",
-      "impact": "Medium",
-      "event_time_utc": "2026-11-20T15:00:00Z",
-      "event_time_wita": "2026-11-20 23:00 WITA",
-      "forecast": null,
-      "forecast_num": null,
-      "previous": "4.3%",
-      "previous_num": 4.3
+      "event_time_utc": "2026-11-25T13:30:00Z",
+      "event_time_wita": "2026-11-25 21:30 WITA",
+      "forecast": "201K",
+      "forecast_num": 201.0,
+      "previous": "203K",
+      "previous_num": 203.0
     }
   ]
 }
